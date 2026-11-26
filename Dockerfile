@@ -2,7 +2,8 @@ FROM node:22-bookworm-slim AS frontend
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
-COPY frontend/ ./
+COPY frontend/index.html frontend/tsconfig.json frontend/vite.config.ts ./
+COPY frontend/src/ ./src/
 RUN npm run build
 
 FROM python:3.13-slim-bookworm
