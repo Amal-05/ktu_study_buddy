@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, select
@@ -17,7 +17,8 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .accounts import HostedAccess, ORIGIN, initialize, workspace_ids
-from .db import HOSTED, ROOT, Chunk, Provider, Subject, Upload, migrate, session, workspace, workspace_data
+from . import blobs
+from .db import HOSTED, ROOT, Chunk, Provider, Subject, Upload, migrate, session, workspace
 from .documents import MAX_BYTES, Outline, default_pattern, extract, parse_syllabus
 from .providers import DEFAULT_LIMITS, ENDPOINTS, MOCK, ProviderError, cipher, endpoint, models, public
 
@@ -54,7 +55,7 @@ if HOSTED:
 else:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
 DB = Annotated[Database, Depends(session)]
-upload_slots = asyncio.Semaphore(2)
+upload_slots = asyncio.Semaphore(1 if os.getenv("RENDER") == "true" else 2)
 
 
 @app.exception_handler(RequestValidationError)
@@ -155,9 +156,9 @@ def upload_detail(upload_id: int, db: DB):
 
 async def read_upload(file):
     try:
-        raw = await file.read(MAX_BYTES + 1)
         name = PurePath((file.filename or "").replace(chr(92), "/")).name[:255]
         async with upload_slots:
+            raw = await file.read(MAX_BYTES + 1)
             return name, raw, await run_in_threadpool(extract, name, raw)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -170,20 +171,20 @@ async def add_upload(subject_id: int, db: DB, file: Annotated[UploadFile, File()
                      tag: Annotated[Literal["syllabus", "notes", "pyq", "textbook", "other"], Form()]):
     subject = require(db, Subject, subject_id)
     name, raw, pages = await read_upload(file)
-    original = workspace_data() / f"{uuid4().hex}.upload"
-    metadata = {"original": original.name}
+    original = f"{uuid4().hex}.upload"
+    metadata = {"original": original}
     row = Upload(subject_id=subject_id, name=name, tag=tag, pages=pages, metadata_json=metadata)
     if tag == "syllabus":
         row.metadata_json = {**metadata, "preview": parse_syllabus(pages)}
-    original.write_bytes(raw)
     try:
+        blobs.store(db, original, raw)
         db.add(row)
         db.flush()
         from .retrieval import index_upload
         await run_in_threadpool(index_upload, db, row, subject)
         db.commit()
     except BaseException:
-        original.unlink(missing_ok=True)
+        blobs.discard_uncommitted(original)
         raise
     return upload_data(row, pages=True)
 
@@ -192,9 +193,13 @@ async def add_upload(subject_id: int, db: DB, file: Annotated[UploadFile, File()
 def download_upload(upload_id: int, db: DB):
     document = require(db, Upload, upload_id)
     original = document.metadata_json.get("original")
-    if not original or not (workspace_data() / original).is_file():
+    content = blobs.load(db, original) if original else None
+    if content is None:
         raise HTTPException(404, "The original file is unavailable")
-    return FileResponse(workspace_data() / original, filename=document.name, media_type="application/octet-stream")
+    from urllib.parse import quote
+    filename = quote(document.name, safe="")
+    return Response(content, media_type="application/octet-stream",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
 
 
 class PageReview(BaseModel):

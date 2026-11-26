@@ -3,11 +3,12 @@ import os
 import re
 import textwrap
 import threading
+import math
 from collections import Counter
 import sqlite_vec
 from sqlalchemy import bindparam, select, text
 
-from .db import DATA, Chunk, Upload
+from .db import DATA, POSTGRES, Chunk, Upload
 
 logger = logging.getLogger(__name__)
 _model = None
@@ -80,6 +81,13 @@ def remap(db, subject):
         chunk.module, chunk.topic = map_topic(chunk.text, subject.outline)
 
 
+def vector_similarity(first, second):
+    left = memoryview(first).cast("f")
+    right = memoryview(second).cast("f")
+    norm = math.sqrt(sum(value * value for value in left) * sum(value * value for value in right))
+    return max(0, sum(a * b for a, b in zip(left, right)) / norm) if norm else 0
+
+
 def query(db, question, subject=None, module=None, topic=None, attachments=(), tags=None, limit=6):
     from sqlalchemy import and_, or_
     statement = select(Chunk, Upload).join(Upload)
@@ -96,7 +104,10 @@ def query(db, question, subject=None, module=None, topic=None, attachments=(), t
     vector_ids = [chunk.id for chunk, _ in candidates if chunk.vector is not None]
     vector = embedding([question])[0] if vector_ids else None
     similarities = {}
-    if vector:
+    if vector and POSTGRES:
+        similarities = {chunk.id: vector_similarity(chunk.vector, vector)
+                        for chunk, _ in candidates if chunk.vector is not None}
+    elif vector:
         # Keep each scoped batch below SQLite's parameter and vec0 neighbor limits.
         knn = text("SELECT rowid, distance FROM chunk_vectors "
                    "WHERE embedding MATCH :embedding AND k = :neighbors AND rowid IN :ids").bindparams(

@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -13,7 +15,8 @@ import httpx
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 
-from .db import HOSTED, Provider, Record, Session, workspace_data, workspace_id
+from .core import insert
+from .db import HOSTED, POSTGRES, Provider, Record, Session, workspace_data, workspace_id
 
 ENDPOINTS = {
     "Gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -28,6 +31,10 @@ MOCK = os.getenv("BUDDY_MOCK", "1") == "1"
 
 
 def cipher():
+    if POSTGRES:
+        master = os.environ["BUDDY_PROVIDER_SECRET"].encode()
+        derived = hmac.digest(master, workspace_id().encode(), "sha256")
+        return Fernet(base64.urlsafe_b64encode(derived))
     path = workspace_data() / "provider.key"
     if not path.exists():
         try:
@@ -310,7 +317,6 @@ class Router:
 
             count = estimate(messages) + len(answer) // 4
             info = {"provider": provider.name, "estimated_tokens": count}
-            from sqlalchemy.dialects.sqlite import insert
             with Session() as db:
                 row = db.get(Provider, provider.id)
                 if row:

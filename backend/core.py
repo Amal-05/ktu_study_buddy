@@ -1,7 +1,10 @@
 from sqlalchemy import select
-from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from .db import Record
+from .db import POSTGRES, Record
+
+insert = pg_insert if POSTGRES else sqlite_insert
 
 
 def get(db, kind, key, default=None):

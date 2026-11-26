@@ -124,7 +124,8 @@ def extract(name, raw):
                     pages.append((native, 0))
                 else:
                     scanned += 1
-                    scale = min(1.6, (12_000_000 / page_area) ** .5)
+                    max_pixels = 3_000_000 if os.getenv("RENDER") == "true" else 12_000_000
+                    scale = min(1.6, (max_pixels / page_area) ** .5)
                     pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), colorspace=pymupdf.csRGB)
                     text, confidence = ocr(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
                     pages.append((text if len(text) > len(native) else native, confidence))

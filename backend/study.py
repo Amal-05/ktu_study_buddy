@@ -11,18 +11,20 @@ import pymupdf
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select
 
 from sample.reference import TOPICS
 
 from .chat import SYSTEM, sanitize_citations, source_block
 from .core import get, put, records
-from .db import Session, Subject, workspace
+from .db import POSTGRES, Record, Session, Subject, workspace
 from .main import DB, require
 from .providers import MOCK, ProviderError, Unavailable, router
 from .research import search
 from .retrieval import query
 
 api = APIRouter(prefix="/api")
+_queue_signal = None
 SECTIONS = ["Definition", "Intuition", "Detailed explanation", "Worked example", "Diagram", "Formulas",
             "Tables", "Common mistakes", "3-mark answer", "9-mark answer", "Quick revision summary"]
 
@@ -211,6 +213,7 @@ def enqueue_notes(subject_id: int, body: StudyInput, db: DB):
            "state": "queued", "message": "", "retry_at": 0}
     put(db, "job", job["id"], job)
     db.commit()
+    wake_jobs()
     return job
 
 
@@ -236,10 +239,20 @@ def job_retry(key: str, db: DB):
     job.update(state="queued", retry_at=0, message="")
     put(db, "job", key, job)
     db.commit()
+    wake_jobs()
     return job
 
 
+def wake_jobs():
+    if _queue_signal:
+        loop, signal = _queue_signal
+        loop.call_soon_threadsafe(signal.set)
+
+
 def recover_jobs():
+    if POSTGRES:
+        # A rolling deploy can overlap an existing worker. Recover its job only after the lease expires.
+        return
     with Session() as db:
         for key, job in records(db, "job"):
             if job["state"] == "running":
@@ -248,22 +261,48 @@ def recover_jobs():
 
 
 async def run_jobs(identities):
-    while True:
-        worked = False
-        for identity in identities():
-            with workspace(identity):
-                worked = await run_job_step() or worked
-        await asyncio.sleep(.15 if worked else .8)
+    global _queue_signal
+    signal = asyncio.Event()
+    _queue_signal = asyncio.get_running_loop(), signal
+    try:
+        while True:
+            signal.clear()
+            worked, upcoming = False, []
+            for identity in identities():
+                with workspace(identity):
+                    processed, resume_at = await run_job_step()
+                    worked = processed or worked
+                    if resume_at is not None:
+                        upcoming.append(resume_at)
+            if worked:
+                await asyncio.sleep(.15)
+                continue
+            timeout = max(.15, min(upcoming) - time.time()) if upcoming else None
+            poll_interval = 600 if POSTGRES else .8
+            timeout = min(poll_interval, timeout) if timeout is not None else poll_interval
+            try:
+                await asyncio.wait_for(signal.wait(), timeout=timeout)
+            except TimeoutError:
+                pass
+    finally:
+        _queue_signal = None
 
 
 async def run_job_step():
     with Session() as db:
-        jobs = records(db, "job")
-        pending = next((job for _, job in reversed(jobs)
-                        if job["state"] in {"queued", "waiting"} and job["retry_at"] <= time.time()), None)
+        query = select(Record.data).where(Record.kind == "job").order_by(Record.id)
+        if POSTGRES:
+            query = query.with_for_update(skip_locked=True)
+        now = time.time()
+        jobs = db.scalars(query).all()
+        pending = next((job for job in jobs
+                        if (job["state"] in {"queued", "waiting"} and job["retry_at"] <= now)
+                        or (POSTGRES and job["state"] == "running" and job.get("lease_until", 0) <= now)), None)
         if not pending:
-            return False
-        pending["state"] = "running"
+            retries = [job["retry_at"] for job in jobs if job["state"] == "waiting"]
+            leases = [job.get("lease_until", 0) for job in jobs if POSTGRES and job["state"] == "running"]
+            return False, min(retries + leases, default=None)
+        pending.update(state="running", lease_until=now + 600)
         put(db, "job", pending["id"], pending)
         db.commit()
     try:
@@ -286,7 +325,7 @@ async def run_job_step():
                 pending.update(state="done" if finished else "queued", message="", retry_at=0)
                 put(db, "job", pending["id"], pending)
                 db.commit()
-            return True
+            return True, None
         pending.update(state="done", message="", retry_at=0)
     except Unavailable as exc:
         pending.update(state="waiting" if exc.next_reset else "failed", message=str(exc), retry_at=exc.next_reset or 0)
@@ -299,7 +338,7 @@ async def run_job_step():
     with Session() as db:
         put(db, "job", pending["id"], pending)
         db.commit()
-    return True
+    return True, None
 
 
 def lesson_public(value):

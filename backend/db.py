@@ -1,4 +1,5 @@
 import os
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
@@ -7,7 +8,7 @@ from pathlib import Path
 import sqlite_vec
 from dotenv import load_dotenv
 from sqlalchemy import JSON, ForeignKey, LargeBinary, String, UniqueConstraint, create_engine, event
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -16,6 +17,8 @@ load_dotenv(ROOT / ".env")
 DATA = Path(os.getenv("BUDDY_DATA", ROOT / ".study-data"))
 DATA.mkdir(parents=True, exist_ok=True)
 HOSTED = os.getenv("BUDDY_HOSTED", "0") == "1"
+DATABASE_URL = os.getenv("BUDDY_DATABASE_URL", "")
+POSTGRES = HOSTED and bool(DATABASE_URL)
 _workspace = ContextVar("study_workspace", default=None)
 
 
@@ -100,6 +103,12 @@ class Record(Base):
     data: Mapped[dict] = mapped_column(JSON)
 
 
+class Blob(Base):
+    __tablename__ = "blobs"
+    key: Mapped[str] = mapped_column(primary_key=True)
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+
+
 def configure(connection, _):
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA journal_mode=WAL")
@@ -122,10 +131,32 @@ def workspace_engine(directory):
 engine = workspace_engine(DATA)
 
 
+@lru_cache(maxsize=1)
+def cloud_engine():
+    url = make_url(DATABASE_URL)
+    if url.drivername not in {"postgres", "postgresql", "postgresql+psycopg"}:
+        raise RuntimeError("BUDDY_DATABASE_URL must use PostgreSQL")
+    if os.getenv("RENDER") == "true" and url.query.get("sslmode") not in {"require", "verify-ca", "verify-full"}:
+        raise RuntimeError("Use the Neon PostgreSQL connection string with SSL enabled")
+    return create_engine(url.set(drivername="postgresql+psycopg"), pool_pre_ping=True,
+                         pool_size=4, max_overflow=4, pool_timeout=15, hide_parameters=True,
+                         connect_args={"prepare_threshold": None, "connect_timeout": 12})
+
+
+def schema_for(identity):
+    if not identity or not re.fullmatch(r"[0-9a-f]{32}", identity):
+        raise RuntimeError("Invalid PostgreSQL workspace identifier")
+    return "study_" + identity
+
+
 def Session():
     if HOSTED and not workspace_id():
         raise RuntimeError("Study data requires an authenticated workspace in hosted mode")
-    return sessionmaker(workspace_engine(workspace_data()), expire_on_commit=False)()
+    if POSTGRES:
+        bind = cloud_engine().execution_options(schema_translate_map={None: schema_for(workspace_id())})
+    else:
+        bind = workspace_engine(workspace_data())
+    return sessionmaker(bind, expire_on_commit=False)()
 
 
 def session():
@@ -133,13 +164,26 @@ def session():
         yield db
 
 
-def migrate():
+def migrate(existing_connection=None):
     from alembic import command
     from alembic.config import Config
 
     config = Config()
     config.set_main_option("script_location", str(ROOT / "backend" / "migrations"))
-    with workspace_engine(workspace_data()).begin() as connection:
-        connection.exec_driver_sql("BEGIN IMMEDIATE")
+    def upgrade(connection):
+        if POSTGRES:
+            schema = schema_for(workspace_id())
+            connection.exec_driver_sql("SELECT pg_advisory_xact_lock(820034913)")
+            connection.exec_driver_sql(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+            connection.exec_driver_sql(f'SET LOCAL search_path TO "{schema}"')
+        else:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
         config.attributes["connection"] = connection
         command.upgrade(config, "head")
+
+    if existing_connection is not None:
+        upgrade(existing_connection)
+    else:
+        database = cloud_engine() if POSTGRES else workspace_engine(workspace_data())
+        with database.begin() as connection:
+            upgrade(connection)

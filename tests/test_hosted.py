@@ -4,14 +4,29 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
 
-def test_hosted_isolation_and_recovery(tmp_path):
+
+def hosted_run(tmp_path, database="", *args):
     root = Path(__file__).resolve().parents[1]
     env = {**os.environ, "BUDDY_HOSTED": "1", "BUDDY_DATA": str(tmp_path),
            "BUDDY_PUBLIC_ORIGIN": "https://study.example.test", "BUDDY_OPEN_SIGNUP": "1",
-           "BUDDY_MAX_ACCOUNTS": "4", "BUDDY_EMBEDDINGS": "lexical", "PYTHONPATH": str(root)}
-    result = subprocess.run([sys.executable, __file__], env=env, cwd=root, capture_output=True, text=True, timeout=60)
+           "BUDDY_MAX_ACCOUNTS": "4", "BUDDY_EMBEDDINGS": "lexical", "PYTHONPATH": str(root),
+           "BUDDY_DATABASE_URL": database, "BUDDY_PROVIDER_SECRET": "A test-only provider encryption secret for PostgreSQL"}
+    result = subprocess.run([sys.executable, __file__, *args], env=env, cwd=root, capture_output=True, text=True, timeout=75)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_hosted_isolation_and_recovery(tmp_path):
+    hosted_run(tmp_path)
+
+
+def test_postgres_survives_fresh_filesystem(tmp_path):
+    database = os.getenv("BUDDY_TEST_POSTGRES_URL")
+    if not database:
+        pytest.skip("Set BUDDY_TEST_POSTGRES_URL to an empty database")
+    hosted_run(tmp_path / "first", database)
+    hosted_run(tmp_path / "second", database, "--verify-restart")
 
 
 def run_hosted_scenario():
@@ -71,7 +86,7 @@ def run_hosted_scenario():
         sample = alice.post("/api/sample", headers=headers).json()
         job = alice.post(f"/api/subjects/{sample['id']}/notes/jobs", headers=headers,
                          json={"module": "1", "topic": "Stacks and queues"}).json()
-        for _ in range(30):
+        for _ in range(70):
             progress = alice.get(f"/api/jobs/{job['id']}").json()
             if progress["state"] in {"done", "failed"}:
                 break
@@ -95,5 +110,34 @@ def run_hosted_scenario():
     bob.close()
 
 
+def verify_restart():
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+
+    from backend.accounts import workspace_ids
+    from backend.db import Provider, Session, workspace
+    from backend.providers import cipher
+    from backend.server import app
+
+    origin = "https://study.example.test"
+    with TestClient(app, base_url=origin) as client:
+        response = client.post("/api/account/login", headers={"Origin": origin},
+                               json={"username": "student.one", "password": "replacement passphrase"})
+        assert response.is_success
+        assert client.get("/api/uploads/1/download").content == b"First student's private material"
+        assert len(client.get("/api/subjects").json()) == 2
+        for identity in workspace_ids():
+            with workspace(identity), Session() as db:
+                provider = db.scalar(select(Provider).where(Provider.kind == "Gemini"))
+                if provider:
+                    assert cipher().decrypt(provider.secret) == b"synthetic-test-provider-key"
+                    break
+        else:
+            raise AssertionError("Provider credentials did not survive the restart")
+
+
 if __name__ == "__main__":
-    run_hosted_scenario()
+    if "--verify-restart" in sys.argv:
+        verify_restart()
+    else:
+        run_hosted_scenario()

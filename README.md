@@ -6,6 +6,8 @@ A single-user study workspace for KTU B.Tech courses under the 2024 scheme. It r
 
 The hosted edition adds public signup, private workspaces, recovery codes, HTTPS, and persistent storage. It runs the same study tools and lets each student bring their own AI key. See the [hosting guide](deploy/README.md) for deployment and backups.
 
+For free managed hosting, use the [Render and Neon deployment guide](deploy/RENDER.md).
+
 ## Start the app
 
 Install Python 3.12 or 3.13 and Node.js 22 with npm. From the project folder, run:

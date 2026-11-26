@@ -12,7 +12,8 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from .core import get, put, records
-from .db import Session, Subject, Upload, workspace_data
+from . import blobs
+from .db import Session, Subject, Upload
 from .main import DB, read_upload, require, upload_data
 from .providers import MOCK, ProviderError, Unavailable, router
 from .research import search
@@ -144,7 +145,7 @@ async def attach(key: str, db: DB, file: UploadFile = File()):
             output = io.BytesIO()
             image.convert("RGB").save(output, format="JPEG", quality=82)
         blob = f"{uuid4().hex}.jpg"
-        (workspace_data() / blob).write_bytes(output.getvalue())
+        blobs.store(db, blob, output.getvalue())
         metadata["image"] = blob
     upload = Upload(name=name, subject_id=None, tag="attachment", pages=pages, metadata_json=metadata)
     db.add(upload)
@@ -250,9 +251,12 @@ async def chat_stream(key: str, body: ChatInput, db: DB):
                 content = prompt
                 if images and not MOCK:
                     content = [{"type": "text", "text": prompt}]
-                    for image in images:
-                        encoded = base64.b64encode((workspace_data() / image).read_bytes()).decode()
-                        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
+                    with Session() as reading:
+                        for image in images:
+                            raw = blobs.load(reading, image)
+                            if raw is not None:
+                                encoded = base64.b64encode(raw).decode()
+                                content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
                 messages = [{"role": "system", "content": CHAT_SYSTEM}, *history, {"role": "user", "content": content}]
                 async for event in router.stream(messages, capability="vision" if images else None, fixture=lambda: mock_answer(sources)):
                     if event["type"] == "delta":

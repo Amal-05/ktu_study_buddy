@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: ktu-study-buddy
+    runtime: docker
+    plan: free
+    region: singapore
+    autoDeployTrigger: "off"
+    healthCheckPath: /api/health
+    envVars:
+      - key: BUDDY_DATABASE_URL
+        sync: false
+      - key: BUDDY_PROVIDER_SECRET
+        generateValue: true
+      - key: BUDDY_HOSTED
+        value: "1"
+      - key: BUDDY_MOCK
+        value: "0"
+      - key: BUDDY_EMBEDDINGS
+        value: lexical
+      - key: BUDDY_MAX_ACCOUNTS
+        value: "12"
+      - key: BUDDY_WORKSPACE_MIB
+        value: "40"
+      - key: SEARCH_MOCK
+        value: "1"

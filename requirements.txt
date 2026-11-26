@@ -14,3 +14,4 @@ pytesseract>=0.3.13,<1
 sqlite-vec==0.1.6
 fastembed>=0.6,<1
 pytest>=8,<10
+psycopg[binary]>=3.2,<4

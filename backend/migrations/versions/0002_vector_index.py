@@ -5,6 +5,8 @@ down_revision = "0001"
 
 
 def upgrade():
+    if op.get_context().dialect.name != "sqlite":
+        return
     op.execute("CREATE VIRTUAL TABLE chunk_vectors USING vec0(embedding float[384] distance_metric=cosine)")
     op.execute("INSERT INTO chunk_vectors(rowid, embedding) SELECT id, vector FROM chunks WHERE vector IS NOT NULL")
     op.execute("""CREATE TRIGGER chunk_vector_insert AFTER INSERT ON chunks WHEN NEW.vector IS NOT NULL
@@ -19,6 +21,8 @@ def upgrade():
 
 
 def downgrade():
+    if op.get_context().dialect.name != "sqlite":
+        return
     for trigger in ("chunk_vector_insert", "chunk_vector_delete", "chunk_vector_update"):
         op.execute(f"DROP TRIGGER {trigger}")
     op.execute("DROP TABLE chunk_vectors")
