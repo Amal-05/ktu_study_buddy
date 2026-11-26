@@ -66,10 +66,6 @@ export function AccountGate({children}:{children:(username?:string,onSignOut?:()
         <button className="btn primary" onClick={()=>enter(issued.username)}>I saved my code</button></div>
       </div>:<>
       <div className="account-intro"><h1>{title}</h1><p>{mode==='recover'?'Use the recovery code from account setup to choose a new password.':'Your study library, conversations, and progress are private to your account.'}</p></div>
-      {mode!=='recover'&&!!account.sign_in_providers?.length&&<div className="account-providers">
-        {account.sign_in_providers.map(provider=><a key={provider} className="btn secondary" href={'/api/account/oauth/'+provider+'/start'}>Continue with {signInNames[provider]}</a>)}
-        <span className="muted">Or use your username and password</span>
-      </div>}
       <form onSubmit={e=>{e.preventDefault();void action.run(async()=>{
         setReturnError('')
         const body=mode==='recover'?{username,password,recovery_code:recoveryCode.trim()}:{username,password}
@@ -88,6 +84,10 @@ export function AccountGate({children}:{children:(username?:string,onSignOut?:()
         {mode==='login'&&<button className="btn plain" onClick={()=>change('recover')}>Forgot password?</button>}
       </div>
       {mode==='signup'&&<p className="muted">For live AI, attach your own provider key in Settings. The provider receives the prompts and source excerpts used to answer your questions.</p>}
+      {mode!=='recover'&&!!account.sign_in_providers?.length&&<div className="account-providers">
+        <span className="account-divider muted">or</span>
+        {account.sign_in_providers.map(provider=><a key={provider} className="btn secondary" href={'/api/account/oauth/'+provider+'/start'}>Continue with {signInNames[provider]}</a>)}
+      </div>}
     </>}
   </section></main>
 }
