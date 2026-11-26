@@ -29,6 +29,6 @@ jobs:
           docker build -t study-buddy:test .
           docker run -d --name study-buddy-smoke -p 127.0.0.1:8000:8000 -e BUDDY_PUBLIC_ORIGIN=https://study.example.test -e BUDDY_EMBEDDINGS=lexical study-buddy:test
           trap 'docker logs study-buddy-smoke; docker rm -f study-buddy-smoke' EXIT
-          curl --retry 12 --retry-delay 2 --retry-connrefused --fail http://127.0.0.1:8000/api/health
+          curl --retry 12 --retry-delay 2 --retry-all-errors --max-time 4 --fail http://127.0.0.1:8000/api/health
           test "$(curl --silent -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/subjects)" = 401
           curl --fail http://127.0.0.1:8000/ | grep -q 'KTU Study Buddy'
