@@ -21,12 +21,17 @@ def test_hosted_isolation_and_recovery(tmp_path):
     hosted_run(tmp_path)
 
 
+def test_oauth_sign_in_and_linking(tmp_path):
+    hosted_run(tmp_path, "", "--verify-oauth")
+
+
 def test_postgres_survives_fresh_filesystem(tmp_path):
     database = os.getenv("BUDDY_TEST_POSTGRES_URL")
     if not database:
         pytest.skip("Set BUDDY_TEST_POSTGRES_URL to an empty database")
     hosted_run(tmp_path / "first", database)
     hosted_run(tmp_path / "second", database, "--verify-restart")
+    hosted_run(tmp_path / "third", database, "--verify-oauth")
 
 
 def run_hosted_scenario():
@@ -136,8 +141,72 @@ def verify_restart():
             raise AssertionError("Provider credentials did not survive the restart")
 
 
+def verify_oauth():
+    from unittest.mock import patch
+    from urllib.parse import parse_qs, urlsplit
+
+    from fastapi.testclient import TestClient
+
+    from backend.server import app
+
+    origin = "https://study.example.test"
+    headers = {"Origin": origin}
+    root = "/api/account/oauth/"
+    env = {f"BUDDY_{provider}_CLIENT_{field}": f"test-{provider}-{field}"
+           for provider in ("GOOGLE", "GITHUB") for field in ("ID", "SECRET")}
+
+    def begin(client, provider, link=False):
+        if link:
+            response = client.post(root + provider + "/link", headers=headers)
+            assert response.is_success, response.text
+            target = response.json()["url"]
+        else:
+            response = client.get(root + provider + "/start")
+            assert response.status_code == 303
+            target = response.headers["location"]
+        query = parse_qs(urlsplit(target).query)
+        assert query["redirect_uri"] == [origin + root + provider + "/callback"]
+        assert query["code_challenge_method"] == ["S256"]
+        return query["state"][0]
+
+    def callback(client, provider, state, code="first"):
+        return client.get(root + provider + "/callback", params={"state": state, "code": code}).headers["location"]
+
+    with (patch.dict(os.environ, env),
+          patch("backend.oauth.provider_identity", side_effect=lambda provider, code, flow: (code, "student")) as provider,
+          TestClient(app, base_url=origin, follow_redirects=False) as alice,
+          TestClient(app, base_url=origin, follow_redirects=False) as bob):
+        assert alice.get("/api/account").json()["sign_in_providers"] == ["google", "github"]
+        assert alice.post(root + "google/link", headers=headers).status_code == 401
+        state = begin(alice, "google")
+        assert callback(bob, "google", state) == "/?signin_error=expired"
+        assert callback(alice, "github", state) == "/?signin_error=expired"
+        provider.assert_not_called()
+        state = begin(alice, "google")
+        assert callback(alice, "google", state) == "/"
+        first = alice.get("/api/account").json()
+        assert first["authenticated"] and first["linked_providers"] == ["google"]
+        assert callback(alice, "google", state) == "/?signin_error=expired"
+        assert callback(bob, "github", begin(bob, "github")) == "/"
+        assert bob.get("/api/account").json()["username"] != first["username"]
+        assert alice.post(root + "github/link").status_code == 403
+        state = begin(alice, "github", link=True)
+        assert callback(alice, "github", state) == "/?signin_error=linked#settings"
+        state = begin(alice, "github", link=True)
+        assert callback(alice, "github", state, code="second") == "/?signin_connected=1#settings"
+        assert set(alice.get("/api/account").json()["linked_providers"]) == {"google", "github"}
+        assert alice.post("/api/account/logout", headers=headers).is_success
+        assert callback(alice, "github", begin(alice, "github"), code="second") == "/"
+        assert alice.get("/api/account").json()["username"] == first["username"]
+        state = begin(bob, "google", link=True)
+        assert bob.post("/api/account/logout", headers=headers).is_success
+        assert callback(bob, "google", state, code="third") == "/?signin_error=expired#settings"
+
+
 if __name__ == "__main__":
     if "--verify-restart" in sys.argv:
         verify_restart()
+    elif "--verify-oauth" in sys.argv:
+        verify_oauth()
     else:
         run_hosted_scenario()

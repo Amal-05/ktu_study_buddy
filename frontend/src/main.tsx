@@ -7,7 +7,7 @@ import {Dashboard} from './overview'
 import {Library, ProviderSettings} from './library'
 import {Notes, Teacher, Exams, Practice} from './learning'
 import {Chat} from './chat'
-import {AccountGate} from './account'
+import {AccountGate, ConnectedSignIns} from './account'
 import './style.css'
 
 const entries=[
@@ -76,7 +76,7 @@ function App({username,onSignOut}:{username?:string,onSignOut?:()=>void}){
         {page==='chat'&&<Chat subjects={subjects} initial={scope} perform={perform}/>}
         {page==='exams'&&<Exams {...shared} practice={id=>{setSelected(id);setScope(undefined);setProposal({tool:'mock',requires_confirmation:false,subject_id:id,module:null,topic:null,argument:''});go('practice')}}/>}
         {page==='practice'&&<Practice {...shared}/>}
-        {page==='settings'&&<ProviderSettings status={status}/>}
+        {page==='settings'&&<>{onSignOut&&<ConnectedSignIns/>}<ProviderSettings status={status}/></>}
       </main>
     </div>
   </div>

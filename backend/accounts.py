@@ -30,6 +30,8 @@ MAX_WORKSPACE_BYTES = int(os.getenv("BUDDY_WORKSPACE_MIB", "128")) * 1024 * 1024
 MAX_REQUEST_BYTES = 21 * 1024 * 1024
 USER_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{2,31}\Z")
 PUBLIC = {"/api/account", "/api/account/signup", "/api/account/login", "/api/account/recover"}
+PUBLIC.update(f"/api/account/oauth/{provider}/{action}"
+              for provider in ("google", "github") for action in ("start", "link", "callback"))
 _attempts = defaultdict(deque)
 _attempt_lock = threading.Lock()
 _accounts_engine = create_engine(URL.create("sqlite", database=str(DATA / "accounts.db")),
@@ -71,6 +73,13 @@ def initialize():
         """)
         db.exec_driver_sql("CREATE INDEX IF NOT EXISTS sessions_account ON sessions(account)")
         db.exec_driver_sql("CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires)")
+        db.exec_driver_sql("""
+            CREATE TABLE IF NOT EXISTS oauth_identities (
+                provider TEXT NOT NULL, subject TEXT NOT NULL,
+                account TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                PRIMARY KEY (provider, subject), UNIQUE (account, provider)
+            )
+        """)
 
 
 def workspace_ids():
@@ -128,7 +137,7 @@ def rate_allowed(key, *, limit, window):
         return True
 
 
-def authenticate_limit(request, username, *, signup=False):
+def request_host(request):
     host = request.client.host if request.client else "unknown"
     if os.getenv("RENDER") == "true":
         forwarded = request.headers.get("cf-connecting-ip", "")
@@ -136,6 +145,11 @@ def authenticate_limit(request, username, *, signup=False):
             host = str(ip_address(forwarded))
         except ValueError:
             pass
+    return host
+
+
+def authenticate_limit(request, username, *, signup=False):
+    host = request_host(request)
     allowed_ip = rate_allowed(("auth", host), limit=12, window=900)
     allowed_name = rate_allowed(("name", username), limit=8, window=900)
     allowed_signup = not signup or rate_allowed(("signup", host), limit=5, window=3600)
@@ -164,7 +178,7 @@ def normalized(username):
     return value
 
 
-def issue(username, identity, *, recovery_code=None):
+def issue(username, identity, *, recovery_code=None, response=None):
     token = secrets.token_urlsafe(32)
     now = int(time.time())
     with authority() as db:
@@ -174,18 +188,21 @@ def issue(username, identity, *, recovery_code=None):
     payload = {"authenticated": True, "username": username}
     if recovery_code:
         payload["recovery_code"] = recovery_code
-    result = JSONResponse(payload)
+    result = JSONResponse(payload) if response is None else response
     result.set_cookie(COOKIE, token, max_age=SESSION_SECONDS, secure=True, httponly=True, samesite="lax", path="/")
     return result
 
 
 @api.get("")
 def account(request: Request):
+    from .oauth import available, linked
+
     if not HOSTED:
         return {"hosted": False, "authenticated": True}
     row = current_account(request.cookies.get(COOKIE))
     return {"hosted": True, "authenticated": bool(row), "username": row["username"] if row else None,
-            "open_signup": OPEN_SIGNUP}
+            "open_signup": OPEN_SIGNUP, "sign_in_providers": available(),
+            "linked_providers": linked(row["id"]) if row else []}
 
 
 @api.post("/signup")

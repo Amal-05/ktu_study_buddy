@@ -13,3 +13,16 @@ Keep the database connection string and provider encryption secret in Render's s
 The free configuration caps signups at 12 workspaces and targets 40 MiB per workspace. It uses keyword retrieval to fit Render's memory limit. Render may sleep when idle, so the next request can take about a minute. Queued notes resume when the process is running and a fresh lease is available.
 
 Render's own free PostgreSQL instances expire after 30 days. This deployment uses Neon for ongoing storage within its free allowance. [Render free-tier limits](https://render.com/docs/free) · [Neon free PostgreSQL](https://neon.com/blog/neon-free-plan-1-gb-per-project)
+
+## Enable Google and GitHub sign-in
+
+Create a [Google OAuth web client](https://console.cloud.google.com/auth/clients) and a [GitHub OAuth App](https://github.com/settings/applications/new). Set the homepage to the deployed HTTPS URL. Use these authorized callback URLs for the public Study Buddy service.
+
+| Provider | Callback URL | Render environment variables |
+| --- | --- | --- |
+| Google | `https://ktu-study-buddy.onrender.com/api/account/oauth/google/callback` | `BUDDY_GOOGLE_CLIENT_ID`, `BUDDY_GOOGLE_CLIENT_SECRET` |
+| GitHub | `https://ktu-study-buddy.onrender.com/api/account/oauth/github/callback` | `BUDDY_GITHUB_CLIENT_ID`, `BUDDY_GITHUB_CLIENT_SECRET` |
+
+For a different deployment, use its own public HTTPS origin. Set the Google audience to External and publish it for public sign-in. Testing mode limits access to the test users you add. Save credentials in the Render service's Environment settings and deploy. OAuth uses the existing `BUDDY_PROVIDER_SECRET` to protect the sign-in flow. Deployments without that secret can set a stable `BUDDY_OAUTH_STATE_SECRET` with at least 32 characters.
+
+The sign-in page automatically shows each configured provider. Existing users can sign in to their workspace and connect a provider in **Settings → Sign-in methods**. An OAuth sign-in from a new provider account creates a separate workspace when public signup is enabled.
