@@ -13,7 +13,7 @@ import httpx
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 
-from .db import DATA, Provider, Record, Session
+from .db import HOSTED, Provider, Record, Session, workspace_data, workspace_id
 
 ENDPOINTS = {
     "Gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -28,7 +28,7 @@ MOCK = os.getenv("BUDDY_MOCK", "1") == "1"
 
 
 def cipher():
-    path = DATA / "provider.key"
+    path = workspace_data() / "provider.key"
     if not path.exists():
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -42,6 +42,8 @@ def cipher():
 def endpoint(kind, custom):
     if kind in ENDPOINTS:
         return ENDPOINTS[kind]
+    if HOSTED:
+        raise ValueError("Custom provider URLs are available in the local edition")
     url = urlsplit(custom)
     if (kind != "Custom" or not url.hostname or url.username or url.password or url.query or url.fragment
             or url.scheme not in {"http", "https"}
@@ -76,11 +78,16 @@ class ProviderError(Exception):
 
 
 class Unavailable(Exception):
-    def __init__(self, next_reset=None):
+    def __init__(self, next_reset=None, exhausted=()):
         self.next_reset = next_reset
         label = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(next_reset)) if next_reset else ""
-        super().__init__(f"Eligible providers are in cooldown. Next retry {label}." if label else
-                         "No eligible provider is available. Check Settings or enable mock mode.")
+        messages = []
+        if exhausted:
+            messages.append(f"API credits or quota exhausted for {', '.join(exhausted)}. "
+                            "Check the provider's API billing or enable another provider in Settings.")
+        if label:
+            messages.append(f"Eligible providers are in cooldown. Next retry {label}.")
+        super().__init__(" ".join(messages) or "No eligible provider is available. Check Settings or enable mock mode.")
 
 
 def retry_delay(headers):
@@ -108,11 +115,28 @@ def retry_delay(headers):
     return max([1, *delays]) if delays else 60
 
 
+QUOTA_CODES = {"insufficient_quota", "credit_balance_exhausted", "billing_hard_limit_reached"}
+
+
+def exhausted_quota(error):
+    return isinstance(error, dict) and any(value in QUOTA_CODES for value in (error.get("code"), error.get("type"))
+                                          if isinstance(value, str))
+
+
 def classify(response):
     status = response.status_code
     if status in (401, 403):
         raise ProviderError(f"Credentials rejected ({status})", "disable")
-    if status in (402, 429) or status >= 500:
+    if status == 402:
+        raise ProviderError("API credits or quota exhausted", "quota")
+    if status == 429:
+        try:
+            error = response.json().get("error")
+        except (ValueError, AttributeError, httpx.ResponseNotRead):
+            error = None
+        if exhausted_quota(error):
+            raise ProviderError("API credits or quota exhausted", "quota")
+    if status == 429 or status >= 500:
         raise ProviderError(f"Upstream HTTP {status}", "cooldown", time.time() + retry_delay(response.headers))
     if status >= 300:
         raise ProviderError(f"Upstream rejected the request ({status}). Check the endpoint and model.", "stop")
@@ -128,6 +152,8 @@ async def compatible_stream(provider, messages, structured):
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=12), follow_redirects=False) as client:
             async with client.stream("POST", provider.base_url + "/chat/completions", headers=auth(provider), json=payload) as response:
+                if response.status_code == 429:
+                    await response.aread()
                 classify(response)
                 finished = False
                 async for line in response.aiter_lines():
@@ -139,6 +165,8 @@ async def compatible_stream(provider, messages, structured):
                         break
                     event = json.loads(data)
                     if event.get("error"):
+                        if exhausted_quota(event["error"]):
+                            raise ProviderError("API credits or quota exhausted", "quota")
                         code = str(event["error"].get("code", "")).lower()
                         if code in {"401", "403", "invalid_api_key"}:
                             raise ProviderError("Credentials rejected", "disable")
@@ -196,7 +224,7 @@ class Router:
         if not (rpm or tpm):
             return
         now = time.time()
-        entries = self.recent[(provider.id, provider.last_four)]
+        entries = self.recent[(workspace_id(), provider.id, provider.last_four)]
         while entries and entries[0][0] <= now - 60:
             entries.popleft()
         tokens = estimate(trim(messages, limits["context"] - limits["max_output"])) + limits["max_output"]
@@ -228,6 +256,7 @@ class Router:
             return
 
         resets = []
+        exhausted = []
         for provider in providers:
             if any(not provider.limits.get(requirement) for requirement in (capability, "structured" if schema else None) if requirement):
                 continue
@@ -268,8 +297,10 @@ class Router:
                         if exc.action == "disable":
                             row.enabled = False
                         else:
-                            row.cooldown = exc.reset
+                            row.cooldown = exc.reset or 0
                         db.commit()
+                if exc.action == "quota":
+                    exhausted.append(provider.name)
                 if exc.reset:
                     resets.append(exc.reset)
                 if answer and not schema:
@@ -292,7 +323,7 @@ class Router:
                 db.commit()
             yield {"type": "done", **info}
             return
-        raise Unavailable(min(resets) if resets else None)
+        raise Unavailable(min(resets) if resets else None, exhausted)
 
     async def complete(self, messages, **options):
         answer = ""

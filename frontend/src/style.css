@@ -41,6 +41,19 @@ h4 {font-size:.92rem; font-weight:750; margin:.75rem 0}
 .profile {border-top:1px solid #30334b; padding:1rem .25rem .25rem; margin-top:.85rem; display:flex; align-items:center; gap:.65rem; font-size:.88rem; font-weight:650}
 .profile svg {margin-left:auto}
 .avatar {display:grid; place-items:center; border-radius:50%; width:2.15rem; height:2.15rem; background:#353252; color:#e5dfff}
+.profile > span:nth-child(2) {overflow-wrap:anywhere; min-width:0}
+.sidebar-signout {margin:.55rem .25rem; color:#e5dfff; text-align:left; font-size:.9rem}
+.sidebar-signout:hover {text-decoration:underline}
+.account-shell {min-height:100dvh; display:grid; place-items:center; padding:1rem; background:radial-gradient(ellipse at top,var(--soft),var(--bg) 60%)}
+.account-panel {width:min(100%,31rem); margin:0; padding:clamp(1.25rem,4vw,2.2rem)}
+.account-brand {display:flex; align-items:center; gap:.8rem; font-weight:750}
+.account-intro {margin:1.35rem 0 .8rem}
+.account-intro h1 {font-size:1.6rem; font-weight:780; line-height:1.2}
+.account-intro p {color:var(--sub); margin:.55rem 0}
+.account-panel .btn {white-space:normal}
+.account-submit {width:100%; margin-top:.8rem}
+.account-links {margin-top:.7rem}
+.recovery-code {margin:.8rem 0; overflow-wrap:anywhere}
 .app-body {min-width:0}
 .topbar {height:64px; display:flex; justify-content:space-between; align-items:center; background:var(--panel); border-bottom:1px solid var(--line); padding:0 clamp(1rem,3vw,2.5rem)}
 .breadcrumbs {display:flex; gap:.65rem; align-items:center; font-size:.9rem; color:var(--sub)}

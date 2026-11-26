@@ -77,7 +77,7 @@ export function Chat({subjects,initial,perform}:{subjects:Subject[],initial?:Sco
     } finally {controller.current=null;setSending(false)}
   }
   return <>
-    <Heading title="Study chat">Ask a question, work through a numerical, or bring in a photo or file.</Heading>
+    <Heading title="Study chat">Ask about any topic. Attach a photo or file for questions about specific material.</Heading>
     <ErrorBox text={action.error}/>
     <div className="chat-layout">
       <aside className="card panel conversation-list">
@@ -88,7 +88,7 @@ export function Chat({subjects,initial,perform}:{subjects:Subject[],initial?:Sco
       <section className="card panel chat-main">
         <div className="section-head"><h2>{chat?.title??'New conversation'}</h2>{chat&&<button className="btn secondary" disabled={sending} onClick={()=>{const title=prompt('Conversation title',chat.title);if(title?.trim())void action.run(async()=>{setChat(await api('/chats/'+chat.id,{title:title.trim()},'PATCH'));await loadList()})}}>Rename</button>}</div>
         <ScopeFields subjects={subjects} scope={scope} onChange={setScope} allowAll/>
-        {!chat?.messages.length&&!stream&&<Empty title="What are you studying?">Ask for a step-by-step explanation or search your uploaded material.</Empty>}
+        {!chat?.messages.length&&!stream&&<Empty title="What are you curious about?">Try “Explain depth-first search with an example.”</Empty>}
         <div className="messages">
           {[...(chat?.messages??[]),...(stream?[stream]:[])].map((item,index)=><article className={'bubble '+item.role} key={index}>
             <div className="message-label">{item.role==='user'?'You':item.provider??'Study Buddy'}{item.estimated_tokens?' · ~'+item.estimated_tokens+' tokens':''}</div>
@@ -100,7 +100,7 @@ export function Chat({subjects,initial,perform}:{subjects:Subject[],initial?:Sco
         {status&&<p className="muted" role="status">{status}</p>}
         {sending&&!stream&&<Busy label="Preparing answer…"/>}
         <form onSubmit={e=>{e.preventDefault();void send()}} className="composer">
-          <label>Message<textarea value={text} onChange={e=>setText(e.target.value)} placeholder="Ask anything about your course…" rows={3}/></label>
+          <label>Message<textarea value={text} onChange={e=>setText(e.target.value)} placeholder="Ask a question…" rows={3}/></label>
           <div className="actions"><label className="btn secondary attach"><Paperclip size={16}/>Attach<input type="file" multiple onChange={e=>setFiles(Array.from(e.target.files??[]).slice(0,5))}/></label>
           <select aria-label="Answer length" value={marks} onChange={e=>setMarks(e.target.value)}><option value="">Answer length</option><option value="3">Answer as 3 marks</option><option value="9">Answer as 9 marks</option></select>
           {sending?<button type="button" className="btn secondary" onClick={()=>controller.current?.abort()}><Square size={15}/>Stop</button>:<button className="btn primary" disabled={!text.trim()&&!files.length}><Send size={16}/>Send</button>}

@@ -1,0 +1,59 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      BUDDY_HOSTED: "1"
+      BUDDY_PUBLIC_ORIGIN: "https://${BUDDY_HOST:?Set BUDDY_HOST in the deployment environment}"
+      BUDDY_MOCK: "0"
+      BUDDY_DATA: /data
+      BUDDY_OPEN_SIGNUP: "${BUDDY_OPEN_SIGNUP:-1}"
+      BUDDY_MAX_ACCOUNTS: "${BUDDY_MAX_ACCOUNTS:-50}"
+      BUDDY_WORKSPACE_MIB: "${BUDDY_WORKSPACE_MIB:-128}"
+      BUDDY_EMBEDDINGS: "${BUDDY_EMBEDDINGS:-local}"
+      BUDDY_PROXY_IPS: "172.30.23.2"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      SEARCH_MOCK: "${SEARCH_MOCK:-1}"
+      TAVILY_API_KEY: "${TAVILY_API_KEY:-}"
+    volumes:
+      - study_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 2g
+    pids_limit: 128
+    networks:
+      - web
+
+  proxy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      BUDDY_HOST: "${BUDDY_HOST:?Set BUDDY_HOST in the deployment environment}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      web:
+        ipv4_address: 172.30.23.2
+
+volumes:
+  study_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  web:
+    ipam:
+      config:
+        - subnet: 172.30.23.0/24

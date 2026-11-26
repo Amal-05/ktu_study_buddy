@@ -16,16 +16,25 @@ from sqlalchemy.orm import Session as Database
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .db import DATA, ROOT, Chunk, Provider, Subject, Upload, migrate, session
+from .accounts import HostedAccess, ORIGIN, initialize, workspace_ids
+from .db import HOSTED, ROOT, Chunk, Provider, Subject, Upload, migrate, session, workspace, workspace_data
 from .documents import MAX_BYTES, Outline, default_pattern, extract, parse_syllabus
 from .providers import DEFAULT_LIMITS, ENDPOINTS, MOCK, ProviderError, cipher, endpoint, models, public
 
 
 @asynccontextmanager
 async def lifespan(app):
-    migrate()
-    from .study import run_jobs
-    worker = asyncio.create_task(run_jobs())
+    from .study import recover_jobs, run_jobs
+    if HOSTED:
+        initialize()
+        for identity in workspace_ids():
+            with workspace(identity):
+                migrate()
+                recover_jobs()
+    else:
+        migrate()
+        recover_jobs()
+    worker = asyncio.create_task(run_jobs(workspace_ids if HOSTED else lambda: [None]))
     try:
         yield
     finally:
@@ -35,9 +44,17 @@ async def lifespan(app):
             await worker
 
 
-app = FastAPI(title="KTU Study Buddy", lifespan=lifespan)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
+app = FastAPI(title="KTU Study Buddy", lifespan=lifespan, docs_url=None if HOSTED else "/docs",
+              redoc_url=None if HOSTED else "/redoc", openapi_url=None if HOSTED else "/openapi.json")
+if HOSTED:
+    app.add_middleware(HostedAccess)
+    from urllib.parse import urlsplit
+    allowed_hostname = urlsplit(ORIGIN).hostname
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[allowed_hostname, "127.0.0.1"] if allowed_hostname else ["127.0.0.1"])
+else:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
 DB = Annotated[Database, Depends(session)]
+upload_slots = asyncio.Semaphore(2)
 
 
 @app.exception_handler(RequestValidationError)
@@ -50,7 +67,7 @@ async def validation_error(request, exc):
 @app.middleware("http")
 async def local_origin(request: Request, call_next):
     origin = request.headers.get("origin")
-    if request.url.path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"} and origin:
+    if not HOSTED and request.url.path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"} and origin:
         from urllib.parse import urlsplit
         if urlsplit(origin).hostname not in {"localhost", "127.0.0.1", "::1"}:
             return JSONResponse({"detail": "Only the local app may change study data"}, status_code=403)
@@ -79,6 +96,10 @@ def subject_data(row):
 @app.get("/api/status")
 def status():
     return {"mock": MOCK, "search_mock": os.getenv("SEARCH_MOCK", "1") == "1"}
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
 
 
 @app.get("/api/subjects")
@@ -136,7 +157,10 @@ async def read_upload(file):
     try:
         raw = await file.read(MAX_BYTES + 1)
         name = PurePath((file.filename or "").replace(chr(92), "/")).name[:255]
-        return name, raw, await run_in_threadpool(extract, name, raw)
+        async with upload_slots:
+            return name, raw, await run_in_threadpool(extract, name, raw)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(422, "Could not read the document. Verify its format, encoding and size.") from exc
 
@@ -146,7 +170,7 @@ async def add_upload(subject_id: int, db: DB, file: Annotated[UploadFile, File()
                      tag: Annotated[Literal["syllabus", "notes", "pyq", "textbook", "other"], Form()]):
     subject = require(db, Subject, subject_id)
     name, raw, pages = await read_upload(file)
-    original = DATA / f"{uuid4().hex}.upload"
+    original = workspace_data() / f"{uuid4().hex}.upload"
     metadata = {"original": original.name}
     row = Upload(subject_id=subject_id, name=name, tag=tag, pages=pages, metadata_json=metadata)
     if tag == "syllabus":
@@ -168,9 +192,9 @@ async def add_upload(subject_id: int, db: DB, file: Annotated[UploadFile, File()
 def download_upload(upload_id: int, db: DB):
     document = require(db, Upload, upload_id)
     original = document.metadata_json.get("original")
-    if not original or not (DATA / original).is_file():
+    if not original or not (workspace_data() / original).is_file():
         raise HTTPException(404, "The original file is unavailable")
-    return FileResponse(DATA / original, filename=document.name, media_type="application/octet-stream")
+    return FileResponse(workspace_data() / original, filename=document.name, media_type="application/octet-stream")
 
 
 class PageReview(BaseModel):
@@ -225,7 +249,7 @@ class ProviderInput(BaseModel):
 @app.get("/api/providers")
 def providers(db: DB):
     return {"providers": [public(row) for row in db.scalars(select(Provider).order_by(Provider.position, Provider.id))],
-            "kinds": list(ENDPOINTS) + ["Custom"], "defaults": DEFAULT_LIMITS}
+            "kinds": list(ENDPOINTS) + ([] if HOSTED else ["Custom"]), "defaults": DEFAULT_LIMITS}
 
 
 @app.post("/api/providers", status_code=201)

@@ -1,11 +1,12 @@
 import asyncio
 import time
 
+import httpx
 import pytest
 from sqlalchemy import delete
 
 from backend.db import Provider, Record, Session, migrate
-from backend.providers import DEFAULT_LIMITS, ProviderError, Router, Unavailable, cipher, retry_delay
+from backend.providers import DEFAULT_LIMITS, ProviderError, Router, Unavailable, cipher, classify, retry_delay
 
 PROMPT = [{"role": "user", "content": "Identify a priority queue."}]
 
@@ -23,9 +24,9 @@ def setup_providers():
         db.commit()
 
 
-def collect(router):
+def collect(router, prompt=PROMPT):
     async def run():
-        return [event async for event in router.stream(PROMPT)]
+        return [event async for event in router.stream(prompt)]
     return asyncio.run(run())
 
 
@@ -39,6 +40,30 @@ def test_429_falls_back_and_marks_cooldown():
     with Session() as db:
         assert db.get(Provider, 1).cooldown > time.time()
     assert retry_delay({"retry-after": "15"}) == 15
+
+
+def test_billing_quota_is_distinct_from_rate_limit_and_can_fall_back():
+    response = httpx.Response(429, json={"error": {"code": "credit_balance_exhausted", "type": "insufficient_quota"}})
+
+    async def provider(row, *_):
+        if row.position == 1:
+            classify(response)
+        yield "Fallback answer"
+
+    result = collect(Router(adapter=provider, mock=False))
+    assert result[0]["message"] == "Provider 1: API credits or quota exhausted"
+    assert result[-1]["provider"] == "Provider 2"
+    with Session() as db:
+        row = db.get(Provider, 1)
+        assert row.enabled and row.cooldown == 0
+
+    async def no_credits(*_):
+        classify(response)
+        yield ""
+
+    with pytest.raises(Unavailable, match="Check the provider's API billing") as error:
+        collect(Router(adapter=no_credits, mock=False), [{"role": "user", "content": "What is a binary heap?"}])
+    assert error.value.next_reset is None
 
 
 def test_partial_answer_resets_before_fallback():

@@ -7,6 +7,7 @@ import {Dashboard} from './overview'
 import {Library, ProviderSettings} from './library'
 import {Notes, Teacher, Exams, Practice} from './learning'
 import {Chat} from './chat'
+import {AccountGate} from './account'
 import './style.css'
 
 const entries=[
@@ -21,7 +22,7 @@ const entries=[
   {id:'settings',title:'Settings',icon:Settings},
 ]
 function activePage(){const hash=location.hash.slice(1);return entries.find(entry=>entry.id===hash)?.id??'overview'}
-function App(){
+function App({username,onSignOut}:{username?:string,onSignOut?:()=>void}){
   const [page,setPage]=useState(activePage)
   const [subjects,setSubjects]=useState<Subject[]>([])
   const [selected,setSelected]=useState<number|null>(null)
@@ -55,7 +56,8 @@ function App(){
       <nav>{entries.slice(0,-1).map(({id,title,icon:Icon})=><a key={id} href={'#'+id} aria-current={page===id?'page':undefined} onClick={e=>{e.preventDefault();setScope(undefined);setProposal(undefined);go(id)}}><Icon size={18}/>{title}</a>)}</nav>
       <div className="sidebar-bottom">
         <a href="#settings" aria-current={page==='settings'?'page':undefined} onClick={e=>{e.preventDefault();go('settings')}}><Settings size={18}/>Settings</a>
-        <div className="profile"><span className="avatar">S</span><span>My workspace<small>Local study space</small></span><ChevronDown size={14}/></div>
+        <div className="profile"><span className="avatar">{username?.[0].toUpperCase()??'S'}</span><span>{username??'My workspace'}<small>{username?'Private workspace':'Local study space'}</small></span>{!onSignOut&&<ChevronDown size={14}/>}</div>
+        {onSignOut&&<button className="sidebar-signout" onClick={onSignOut}>Sign out</button>}
       </div>
     </aside>
     <div className="app-body">
@@ -79,4 +81,4 @@ function App(){
     </div>
   </div>
 }
-createRoot(document.getElementById('root')!).render(<App/>)
+createRoot(document.getElementById('root')!).render(<AccountGate>{(username,onSignOut)=><App username={username} onSignOut={onSignOut}/>}</AccountGate>)

@@ -12,7 +12,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from .core import get, put, records
-from .db import DATA, Session, Subject, Upload
+from .db import Session, Subject, Upload, workspace_data
 from .main import DB, read_upload, require, upload_data
 from .providers import MOCK, ProviderError, Unavailable, router
 from .research import search
@@ -24,6 +24,10 @@ SYSTEM = ("You are KTU Study Buddy for the 2024 B.Tech scheme. Teach accurately.
           "Cite the supplied source IDs using [S1], [S2] etc. for claims they support. "
           "Signal when sources do not cover a question and label general model knowledge. "
           "Do not invent sources, papers, years, or quotations. Use Markdown and LaTeX.")
+CHAT_SYSTEM = (SYSTEM + " Study Chat is open-ended. Answer from general knowledge whenever relevant sources "
+               "are unavailable or incomplete. Uploads, citations, and picking a subject are optional. "
+               "Begin with the answer. For explanations, give an example when it helps. "
+               "A selected subject guides retrieval and terminology. It never limits what you can answer.")
 
 
 def source_block(sources):
@@ -140,7 +144,7 @@ async def attach(key: str, db: DB, file: UploadFile = File()):
             output = io.BytesIO()
             image.convert("RGB").save(output, format="JPEG", quality=82)
         blob = f"{uuid4().hex}.jpg"
-        (DATA / blob).write_bytes(output.getvalue())
+        (workspace_data() / blob).write_bytes(output.getvalue())
         metadata["image"] = blob
     upload = Upload(name=name, subject_id=None, tag="attachment", pages=pages, metadata_json=metadata)
     db.add(upload)
@@ -240,14 +244,16 @@ async def chat_stream(key: str, body: ChatInput, db: DB):
             else:
                 instruction = f" Write a {body.marks}-mark exam answer." if body.marks else ""
                 mode = f"\nStudy instruction: {body.mode}" if body.mode else ""
-                prompt = f"{body.text}{instruction}{mode}\n\nUntrusted source excerpts:\n{source_block(sources)}"
+                prompt = f"{body.text}{instruction}{mode}"
+                if sources:
+                    prompt += f"\n\nUntrusted source excerpts:\n{source_block(sources)}"
                 content = prompt
                 if images and not MOCK:
                     content = [{"type": "text", "text": prompt}]
                     for image in images:
-                        encoded = base64.b64encode((DATA / image).read_bytes()).decode()
+                        encoded = base64.b64encode((workspace_data() / image).read_bytes()).decode()
                         content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
-                messages = [{"role": "system", "content": SYSTEM}, *history, {"role": "user", "content": content}]
+                messages = [{"role": "system", "content": CHAT_SYSTEM}, *history, {"role": "user", "content": content}]
                 async for event in router.stream(messages, capability="vision" if images else None, fixture=lambda: mock_answer(sources)):
                     if event["type"] == "delta":
                         answer += event["text"]

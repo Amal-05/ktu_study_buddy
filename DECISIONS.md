@@ -10,3 +10,5 @@
 - The sample is original instructional material. Mock AI uses the bundled examples and retrieved excerpts, and mock web search returns no results.
 - sqlite-vec stores the local embedding index. Lexical matching remains available offline when model weights are missing.
 - The note queue stores progress in SQLite and resumes unfinished jobs when the app restarts. Regeneration keeps all revisions and preserves the active student edit.
+- Hosted mode stores each account's study data and provider credentials in its own SQLite database and directory. The service uses server-side sessions and a public HTTPS origin.
+- The free-host profile runs on a single Linux VM with persistent storage. Hosted students bring their own AI provider credentials. The deployment can pause signups and caps registrations and workspace storage.

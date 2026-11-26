@@ -8,14 +8,17 @@ from urllib.robotparser import RobotFileParser
 import httpx
 
 from .core import get, put
-from .db import Session
+from .db import HOSTED, Session
 
 SEARCH_MOCK = os.getenv("SEARCH_MOCK", "1") == "1"
 AGENT = "KTUStudyBuddy"
+HOSTED_SOURCE_HOSTS = {"ktu.edu.in", "www.ktu.edu.in"}
 
 
 async def public_url(url):
     parsed = urlsplit(url)
+    if HOSTED and parsed.hostname not in HOSTED_SOURCE_HOSTS:
+        return False
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in (None, 443):
         return False
     try:

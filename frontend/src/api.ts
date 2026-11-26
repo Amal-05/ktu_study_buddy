@@ -6,6 +6,7 @@ export async function api<T>(path: string, body?: unknown, method?: string): Pro
     body: body === undefined ? undefined : form ? body : JSON.stringify(body),
   })
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith('/account')) dispatchEvent(new Event('buddy-session-ended'))
     const issue = await response.json().catch(() => ({}))
     const detail = Array.isArray(issue.detail) ? issue.detail.map((item: {msg: string}) => item.msg).join(', ') : issue.detail
     throw new Error(detail ?? 'Request failed (' + response.status + ')')

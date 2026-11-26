@@ -1,0 +1,12 @@
+{$BUDDY_HOST} {
+    @accounts path /api/account/*
+    request_body @accounts {
+        max_size 4096
+    }
+    request_body {
+        max_size 22020096
+    }
+    reverse_proxy app:8000 {
+        stream_timeout 5m
+    }
+}

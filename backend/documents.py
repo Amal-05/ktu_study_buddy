@@ -13,6 +13,8 @@ from PIL import Image
 from pptx import Presentation
 from pydantic import BaseModel, Field, model_validator
 
+from .db import HOSTED
+
 MAX_BYTES = 20 * 1024 * 1024
 FORMATS = {".pdf", ".docx", ".pptx", ".txt", ".md", ".markdown", ".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
 if os.getenv("TESSERACT_CMD"):
@@ -82,7 +84,7 @@ def default_pattern():
 
 def ocr(image):
     try:
-        raw = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT, timeout=25)
+        raw = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT, timeout=8 if HOSTED else 25)
     except (pytesseract.TesseractError, pytesseract.TesseractNotFoundError, RuntimeError):
         return "", 0
     lines = {}
@@ -106,9 +108,11 @@ def extract(name, raw):
         if not raw.startswith(b"%PDF-"):
             raise ValueError("The file is not a PDF")
         with pymupdf.open(stream=raw, filetype="pdf") as doc:
-            if doc.needs_pass or len(doc) > 300:
-                raise ValueError("PDF must be unlocked and contain at most 300 pages")
+            limit = 120 if HOSTED else 300
+            if doc.needs_pass or len(doc) > limit:
+                raise ValueError(f"PDF must be unlocked and contain at most {limit} pages")
             pages = []
+            scanned = 0
             for page in doc:
                 native = page.get_text(sort=True).strip()
                 page_area = max(1, page.rect.width * page.rect.height)
@@ -116,7 +120,10 @@ def extract(name, raw):
                                    for image in page.get_image_info()), default=0)
                 if len(native) >= 40 and not (image_cover > .6 and len(native) < 350):
                     pages.append((native, None))
+                elif HOSTED and scanned >= 8:
+                    pages.append((native, 0))
                 else:
+                    scanned += 1
                     scale = min(1.6, (12_000_000 / page_area) ** .5)
                     pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), colorspace=pymupdf.csRGB)
                     text, confidence = ocr(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))

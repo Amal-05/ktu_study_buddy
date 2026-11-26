@@ -1,0 +1,16 @@
+**
+!requirements.txt
+!backend/
+!backend/**
+!sample/
+!sample/**
+!frontend/
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/index.html
+!frontend/vite.config.ts
+!frontend/tsconfig.json
+!frontend/src/
+!frontend/src/**
+**/__pycache__
+**/*.pyc

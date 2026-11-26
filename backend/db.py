@@ -1,15 +1,40 @@
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import lru_cache
 from pathlib import Path
 
 import sqlite_vec
 from dotenv import load_dotenv
 from sqlalchemy import JSON, ForeignKey, LargeBinary, String, UniqueConstraint, create_engine, event
+from sqlalchemy.engine import URL
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.pool import NullPool
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 DATA = Path(os.getenv("BUDDY_DATA", ROOT / ".study-data"))
 DATA.mkdir(parents=True, exist_ok=True)
+HOSTED = os.getenv("BUDDY_HOSTED", "0") == "1"
+_workspace = ContextVar("study_workspace", default=None)
+
+
+def workspace_id():
+    return _workspace.get()
+
+
+def workspace_data():
+    identity = workspace_id()
+    return DATA / "workspaces" / identity if identity else DATA
+
+
+@contextmanager
+def workspace(identity):
+    token = _workspace.set(identity)
+    try:
+        yield
+    finally:
+        _workspace.reset(token)
 
 
 class Base(DeclarativeBase):
@@ -75,10 +100,6 @@ class Record(Base):
     data: Mapped[dict] = mapped_column(JSON)
 
 
-engine = create_engine(f"sqlite:///{(DATA / 'buddy.db').as_posix()}", connect_args={"check_same_thread": False})
-
-
-@event.listens_for(engine, "connect")
 def configure(connection, _):
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA journal_mode=WAL")
@@ -89,7 +110,22 @@ def configure(connection, _):
         connection.enable_load_extension(False)
 
 
-Session = sessionmaker(engine, expire_on_commit=False)
+@lru_cache(maxsize=256)
+def workspace_engine(directory):
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    result = create_engine(URL.create("sqlite", database=str(directory / "buddy.db")),
+                           connect_args={"check_same_thread": False, "timeout": 10}, poolclass=NullPool)
+    event.listen(result, "connect", configure)
+    return result
+
+
+engine = workspace_engine(DATA)
+
+
+def Session():
+    if HOSTED and not workspace_id():
+        raise RuntimeError("Study data requires an authenticated workspace in hosted mode")
+    return sessionmaker(workspace_engine(workspace_data()), expire_on_commit=False)()
 
 
 def session():
@@ -103,7 +139,7 @@ def migrate():
 
     config = Config()
     config.set_main_option("script_location", str(ROOT / "backend" / "migrations"))
-    with engine.begin() as connection:
+    with workspace_engine(workspace_data()).begin() as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         config.attributes["connection"] = connection
         command.upgrade(config, "head")

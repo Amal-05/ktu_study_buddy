@@ -103,6 +103,29 @@ def test_citation_allowlist_and_live_pages(client):
     assert sanitize_citations("Source [S1], unknown [S55].", [{"label": "S1"}]) == "Source [S1], unknown ."
 
 
+def test_open_ended_chat_without_sources_or_subject(client, monkeypatch):
+    from backend import chat
+
+    monkeypatch.setattr(chat, "MOCK", False)
+    monkeypatch.setattr(chat, "query", lambda *_: [])
+    prompt = "Explain depth-first search"
+
+    async def provider(messages, **options):
+        assert "open-ended" in messages[0]["content"]
+        assert messages[-1] == {"role": "user", "content": prompt}
+        yield {"type": "delta", "text": "Depth-first search follows a branch to its end, then backtracks."}
+        yield {"type": "done", "provider": "Test provider"}
+
+    monkeypatch.setattr(chat.router, "stream", provider)
+    conversation = client.post("/api/chats", json={}).json()
+    stream = client.post(f"/api/chats/{conversation['id']}/stream", json={"text": prompt})
+    events = [json.loads(line[6:]) for line in stream.text.splitlines() if line.startswith("data: ")]
+    result = events[-1]["message"]
+    assert result["content"].startswith("Depth-first search follows a branch")
+    assert "General model knowledge" in result["content"]
+    assert result["sources"] == []
+
+
 def test_sample_end_to_end(client):
     sample = client.post("/api/sample").json()
     base = f"/api/subjects/{sample['id']}"

@@ -16,7 +16,7 @@ from sample.reference import TOPICS
 
 from .chat import SYSTEM, sanitize_citations, source_block
 from .core import get, put, records
-from .db import Session, Subject
+from .db import Session, Subject, workspace
 from .main import DB, require
 from .providers import MOCK, ProviderError, Unavailable, router
 from .research import search
@@ -239,52 +239,67 @@ def job_retry(key: str, db: DB):
     return job
 
 
-async def run_jobs():
+def recover_jobs():
     with Session() as db:
         for key, job in records(db, "job"):
             if job["state"] == "running":
                 put(db, "job", key, {**job, "state": "queued"})
         db.commit()
+
+
+async def run_jobs(identities):
     while True:
-        with Session() as db:
-            jobs = records(db, "job")
-            pending = next((job for _, job in reversed(jobs) if job["state"] in {"queued", "waiting"} and job["retry_at"] <= time.time()), None)
-            if pending:
-                pending["state"] = "running"
+        worked = False
+        for identity in identities():
+            with workspace(identity):
+                worked = await run_job_step() or worked
+        await asyncio.sleep(.15 if worked else .8)
+
+
+async def run_job_step():
+    with Session() as db:
+        jobs = records(db, "job")
+        pending = next((job for _, job in reversed(jobs)
+                        if job["state"] in {"queued", "waiting"} and job["retry_at"] <= time.time()), None)
+        if not pending:
+            return False
+        pending["state"] = "running"
+        put(db, "job", pending["id"], pending)
+        db.commit()
+    try:
+        subject_id, module = pending["subject_id"], pending["module"]
+        if pending["completed"] < len(pending["topics"]):
+            topic = pending["topics"][pending["completed"]]
+            with Session() as db:
+                subject = require(db, Subject, subject_id)
+                study_scope(subject, module, topic)
+                note = await build_note(db, subject, module, topic)
+            with Session() as db:
+                value = note_data(db, subject_id, module, topic)
+                value["versions"].insert(0, note)
+                current = next((item for item in value["versions"] if item["id"] == value["active"]), None)
+                if current is None or not current["edited"]:
+                    value["active"] = note["id"]
+                put(db, "notes", study_key(subject_id, module, topic), value)
+                pending["completed"] += 1
+                finished = pending["completed"] == len(pending["topics"])
+                pending.update(state="done" if finished else "queued", message="", retry_at=0)
                 put(db, "job", pending["id"], pending)
                 db.commit()
-        if not pending:
-            await asyncio.sleep(.8)
-            continue
-        try:
-            subject_id, module = pending["subject_id"], pending["module"]
-            for topic in pending["topics"][pending["completed"]:]:
-                with Session() as db:
-                    subject = require(db, Subject, subject_id)
-                    study_scope(subject, module, topic)
-                    note = await build_note(db, subject, module, topic)
-                with Session() as db:
-                    value = note_data(db, subject_id, module, topic)
-                    value["versions"].insert(0, note)
-                    current = next((item for item in value["versions"] if item["id"] == value["active"]), None)
-                    if current is None or not current["edited"]:
-                        value["active"] = note["id"]
-                    put(db, "notes", study_key(subject_id, module, topic), value)
-                    pending["completed"] += 1
-                    put(db, "job", pending["id"], pending)
-                    db.commit()
-            pending.update(state="done", message="", retry_at=0)
-        except Unavailable as exc:
-            pending.update(state="waiting" if exc.next_reset else "failed", message=str(exc), retry_at=exc.next_reset or 0)
-        except ProviderError as exc:
-            pending.update(state="failed", message=str(exc))
-        except Exception:
-            import logging
-            logging.getLogger(__name__).exception("Note job failed")
-            pending.update(state="failed", message="Could not generate the notes. Check the source and try again.")
-        with Session() as db:
-            put(db, "job", pending["id"], pending)
-            db.commit()
+            return True
+        pending.update(state="done", message="", retry_at=0)
+    except Unavailable as exc:
+        pending.update(state="waiting" if exc.next_reset else "failed", message=str(exc), retry_at=exc.next_reset or 0)
+    except ProviderError as exc:
+        pending.update(state="failed", message=str(exc))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Note job failed")
+        pending.update(state="failed", message="Could not generate the notes. Check the source and try again.")
+    with Session() as db:
+        put(db, "job", pending["id"], pending)
+        db.commit()
+    return True
 
 
 def lesson_public(value):
