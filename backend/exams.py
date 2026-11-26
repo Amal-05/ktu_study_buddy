@@ -43,7 +43,7 @@ def paper_fields(text):
             "session": session[1] if session else "", "scheme": int(scheme[1] or scheme[2]) if scheme else None}
 
 
-def extract_questions(upload, outline):
+def extract_questions(upload, outline, *, include_unmatched=False):
     metadata = paper_fields("\n".join(page["text"] for page in upload.pages))
     metadata.update({key: value for key, value in upload.metadata_json.items() if key in metadata and value})
     entries = []
@@ -71,12 +71,12 @@ def extract_questions(upload, outline):
         if len(row["text"]) < 10:
             continue
         module, topic = map_topic(row["text"], outline)
-        if not topic:
-            continue
-        if metadata["scheme"] != 2024:
+        if topic and metadata["scheme"] != 2024:
             normalized = words(topic)
             if not normalized or len(normalized & words(row["text"])) / len(normalized) < .65:
-                continue
+                module, topic = None, None
+        if not topic and not include_unmatched:
+            continue
         if row["part"] is None and row["marks"]:
             matching = [part["name"] for part in outline["pattern"]["parts"] if part["marks"] == row["marks"]]
             if len(matching) == 1:
@@ -230,7 +230,7 @@ def paper_questions(subject_id: int, upload_id: int, db: DB):
     if paper.subject_id != subject_id or paper.tag != "pyq":
         raise HTTPException(404, "Paper does not exist for this subject")
     return {"metadata": {**paper_fields("\n".join(page["text"] for page in paper.pages)), **paper.metadata_json},
-            "questions": extract_questions(paper, subject.outline)}
+            "questions": extract_questions(paper, subject.outline, include_unmatched=True)}
 
 
 @api.post("/subjects/{subject_id}/paper-search")

@@ -44,7 +44,8 @@ export function Exams(shared:Shared&{practice:(id:number)=>void}){
       <p className="notice">{data.confidence}. Predictions are estimates. Generated questions are labelled.</p>
       {data.backtest&&<p>Backtest · held out {data.backtest.session} {data.backtest.year}: {data.backtest.hits}/{data.backtest.total} topics matched ({Math.round(data.backtest.rate*100)}%). {data.backtest.method}.</p>}
       <details><summary>Scoring weights</summary><dl className="factors">{Object.entries(data.weights).map(([key,value])=><div key={key}><dt>{key.replaceAll('_',' ')}</dt><dd>{value}</dd></div>)}</dl></details>
-      {!data.topics.length&&<Empty title="No topics ranked">Confirm a syllabus in the subject library.</Empty>}
+      {!data.topics.length&&<Empty title="No topics ranked">Review and confirm the syllabus in the <a href="#library">Subject Library</a>.</Empty>}
+      {!!files.length&&!!data.topics.length&&!data.matched_questions&&<p className="notice">No past-paper questions matched these syllabus topics. Open an uploaded paper above to check the extracted questions.</p>}
       {subject?.outline.modules.map(module=><div className="coverage-group" key={module.id}><h3>{module.name}</h3>
         {data.topics.filter(topic=>topic.module===module.id).map(topic=><details key={topic.topic}><summary>{topic.topic} <span className="chip">{topic.priority} · {topic.score}</span></summary>
           <dl className="factors">{Object.entries(topic.factors).map(([key,value])=><div key={key}><dt>{key.replaceAll('_',' ')}</dt><dd>{value}</dd></div>)}</dl>
@@ -60,10 +61,10 @@ export function Exams(shared:Shared&{practice:(id:number)=>void}){
 }
 function PaperMetadata({row,base,refresh}:{row:Upload,base:string,refresh:()=>Promise<void>}){
   const [year,setYear]=useState(row.metadata.year??0),[scheme,setScheme]=useState(row.metadata.scheme??0),[session,setSession]=useState(row.metadata.session??'')
-  const [questions,setQuestions]=useState<Evidence[]>([])
+  const [questions,setQuestions]=useState<(Evidence&{topic:string|null})[]>()
   const action=useAction()
   return <details><summary>{row.name}</summary><form className="inline-form" onSubmit={e=>{e.preventDefault();void action.run(async()=>{await api(base+'/papers/'+row.id,{year:year||null,scheme:scheme||null,session},'PUT');await refresh()})}}>
     <label>Year<input type="number" placeholder="Unknown" value={year||''} onChange={e=>setYear(Number(e.target.value))}/></label><label>Scheme<input type="number" placeholder="Unknown" value={scheme||''} onChange={e=>setScheme(Number(e.target.value))}/></label><label>Session<input value={session} onChange={e=>setSession(e.target.value)}/></label>
-    <button className="btn secondary" disabled={action.busy}>Save metadata</button><button className="btn plain" type="button" disabled={action.busy} onClick={()=>void action.run(async()=>{const got=await api<{metadata:{year?:number,scheme?:number,session?:string},questions:Evidence[]}>(base+'/papers/'+row.id+'/questions');setQuestions(got.questions);setYear(got.metadata.year??0);setScheme(got.metadata.scheme??0);setSession(got.metadata.session??'')})}>Read detected metadata</button>
-  </form><ErrorBox text={action.error}/>{questions.length>0&&<ol>{questions.map((item,index)=><li key={index}>{item.text} ({item.marks??'Unknown'} marks)</li>)}</ol>}</details>
+    <button className="btn secondary" disabled={action.busy}>Save metadata</button><button className="btn plain" type="button" disabled={action.busy} onClick={()=>void action.run(async()=>{const got=await api<{metadata:{year?:number,scheme?:number,session?:string},questions:(Evidence&{topic:string|null})[]}>(base+'/papers/'+row.id+'/questions');setQuestions(got.questions);setYear(got.metadata.year??0);setScheme(got.metadata.scheme??0);setSession(got.metadata.session??'')})}>Read paper questions</button>
+  </form><ErrorBox text={action.error}/>{questions&&(questions.length?<ol>{questions.map((item,index)=><li key={index}>{item.text} ({item.marks??'Unknown'} marks)<small>{item.topic??'No syllabus topic matched'}</small></li>)}</ol>:<p className="notice">No numbered questions were detected. Check the extracted pages in the Subject Library.</p>)}</details>
 }

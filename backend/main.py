@@ -154,12 +154,12 @@ def upload_detail(upload_id: int, db: DB):
     return upload_data(require(db, Upload, upload_id), pages=True)
 
 
-async def read_upload(file):
+async def read_upload(file, *, syllabus_code=None):
     try:
         name = PurePath((file.filename or "").replace(chr(92), "/")).name[:255]
         async with upload_slots:
             raw = await file.read(MAX_BYTES + 1)
-            return name, raw, await run_in_threadpool(extract, name, raw)
+            return name, raw, await run_in_threadpool(extract, name, raw, syllabus_code=syllabus_code)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
@@ -170,12 +170,15 @@ async def read_upload(file):
 async def add_upload(subject_id: int, db: DB, file: Annotated[UploadFile, File()],
                      tag: Annotated[Literal["syllabus", "notes", "pyq", "textbook", "other"], Form()]):
     subject = require(db, Subject, subject_id)
-    name, raw, pages = await read_upload(file)
+    syllabus_code = subject.code if tag == "syllabus" else None
+    name, raw, pages = await read_upload(file, syllabus_code=syllabus_code)
     original = f"{uuid4().hex}.upload"
     metadata = {"original": original}
     row = Upload(subject_id=subject_id, name=name, tag=tag, pages=pages, metadata_json=metadata)
     if tag == "syllabus":
-        row.metadata_json = {**metadata, "preview": parse_syllabus(pages)}
+        async with upload_slots:
+            preview = await run_in_threadpool(parse_syllabus, pages, raw=raw, course_code=syllabus_code)
+        row.metadata_json = {**metadata, "preview": preview}
     try:
         blobs.store(db, original, raw)
         db.add(row)
@@ -187,6 +190,20 @@ async def add_upload(subject_id: int, db: DB, file: Annotated[UploadFile, File()
         blobs.discard_uncommitted(original)
         raise
     return upload_data(row, pages=True)
+
+
+def preview_for(db, document, subject):
+    original = document.metadata_json.get("original")
+    raw = blobs.load(db, original) if original and PurePath(document.name).suffix.lower() == ".pdf" else None
+    return parse_syllabus(document.pages, raw=raw, course_code=subject.code)
+
+
+@app.get("/api/uploads/{upload_id}/syllabus-preview")
+def syllabus_preview(upload_id: int, db: DB):
+    document = require(db, Upload, upload_id)
+    if document.tag != "syllabus" or document.subject_id is None:
+        raise HTTPException(404, "This upload is not a syllabus")
+    return preview_for(db, document, require(db, Subject, document.subject_id))
 
 
 @app.get("/api/uploads/{upload_id}/download")
@@ -213,12 +230,12 @@ def review_page(upload_id: int, page_number: int, body: PageReview, db: DB):
     document = require(db, Upload, upload_id)
     if not any(page["number"] == page_number for page in document.pages):
         raise HTTPException(404, "Page does not exist")
-    replacement = {"number": page_number, "text": body.text.strip(), "ocr_confidence": None, "review": False}
+    replacement = {"number": page_number, "text": body.text.strip(), "ocr_confidence": None, "review": False, "corrected": True}
     document.pages = [replacement if page["number"] == page_number else page for page in document.pages]
-    if document.tag == "syllabus":
-        document.metadata_json = {**document.metadata_json, "preview": parse_syllabus(document.pages)}
-    db.execute(delete(Chunk).where(Chunk.upload_id == upload_id, Chunk.page == page_number))
     subject = db.get(Subject, document.subject_id) if document.subject_id else None
+    if document.tag == "syllabus" and subject:
+        document.metadata_json = {**document.metadata_json, "preview": preview_for(db, document, subject)}
+    db.execute(delete(Chunk).where(Chunk.upload_id == upload_id, Chunk.page == page_number))
     index_upload(db, document, subject, pages=[replacement])
     db.commit()
     return upload_data(document, pages=True)

@@ -3,6 +3,7 @@ import time
 from io import BytesIO
 from types import SimpleNamespace
 
+import pymupdf
 from docx import Document
 
 from backend.chat import sanitize_citations
@@ -42,6 +43,49 @@ def test_sample_syllabus_and_default_paper():
     assert all(len(module["questions"]) == module["attempt"] == 2 for module in part_a["groups"])
     assert all(len(module["questions"]) == 2 and module["attempt"] == 1 for module in part_b["groups"])
     assert all(q["generated"] for part in paper["sections"] for group in part["groups"] for q in group["questions"])
+
+
+def test_table_syllabus_review_populates_modules_and_matches_uploaded_pyq(client):
+    with pymupdf.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((40, 55), "Course Code TEST301    CIE Marks 40    ESE Marks 30")
+        page.insert_text((40, 80), "SYLLABUS")
+        for y in (100, 130, 175, 220):
+            page.draw_line((40, y), (550, y))
+        for x in (40, 130, 450, 550):
+            page.draw_line((x, 100), (x, 220))
+        for y, number, contents, hours in (
+            (120, "Module No.", "Syllabus Description", "Contact Hours"),
+            (150, "1", "Graph traversal\nDepth first search; Breadth first search", "9"),
+            (195, "2", "Sorting\nSelection sort; Merge sort", "8"),
+        ):
+            for x, value in ((48, number), (145, contents), (465, hours)):
+                page.insert_text((x, y), value)
+        page.insert_text((40, 255), "Choose one full question out of two questions in Part B.")
+        page.insert_text((40, 275), "(4x3 = 12 marks) (2x9 = 18 marks)")
+        raw = pdf.tobytes()
+
+    subject = client.post("/api/subjects", json={"code": "TEST301", "name": "Example", "semester": 3,
+                                                "branch": "Computer Science", "exam_date": "2029-01-01"}).json()
+    base = f"/api/subjects/{subject['id']}"
+    paper = client.post(base + "/uploads", data={"tag": "pyq"},
+                        files={"file": ("paper.txt", b"2024 Scheme\nPART A\n1. Explain Depth first search. (3)")}).json()
+    questions = base + f"/papers/{paper['id']}/questions"
+    assert client.get(questions).json()["questions"][0]["topic"] is None
+    uploaded = client.post(base + "/uploads", data={"tag": "syllabus"}, files={"file": ("syllabus.pdf", raw)})
+    assert uploaded.status_code == 201, uploaded.text
+    syllabus = uploaded.json()
+    preview = client.get(f"/api/uploads/{syllabus['id']}/syllabus-preview").json()
+    assert preview == syllabus["metadata"]["preview"]
+    assert [(module["id"], module["name"], module["hours"]) for module in preview["modules"]] == [
+        ("1", "Graph traversal", 9), ("2", "Sorting", 8),
+    ]
+    assert client.get(base + "/coverage").json() == []
+    confirmed = client.put(base + "/outline", json=preview)
+    assert confirmed.is_success, confirmed.text
+    assert [module["id"] for module in client.get(base + "/coverage").json()] == ["1", "2"]
+    assert client.get(questions).json()["questions"][0]["topic"] == "Depth first search"
+    assert client.get(base + "/predictions").json()["matched_questions"] == 1
 
 
 def test_pattern_consumes_subject_configuration():

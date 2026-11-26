@@ -59,14 +59,14 @@ export function Markdown({value,sources=[]}:{value:string,sources?:Source[]}) {
 export function ScopeFields({subjects,scope,onChange,allowAll=false,requireTopic=false}:{subjects:Subject[],scope:Scope,onChange:(s:Scope)=>void,allowAll?:boolean,requireTopic?:boolean}) {
   const subject=subjects.find(item=>item.id===scope.subject_id)
   const module=subject?.outline.modules.find(item=>item.id===scope.module)
-  return <div className="field-grid scope-fields">
+  return <><div className="field-grid scope-fields">
     <label>Subject<select value={scope.subject_id??''} onChange={e=>onChange({subject_id:Number(e.target.value)||null,module:null,topic:null})}>
       <option value="">{allowAll?'All subjects':'Select a subject'}</option>{subjects.map(item=><option value={item.id} key={item.id}>{item.code} · {item.name}</option>)}</select></label>
-    <label>Module<select disabled={!subject} value={scope.module??''} onChange={e=>onChange({...scope,module:e.target.value||null,topic:null})}>
-      <option value="">{requireTopic?'Select a module':'All modules'}</option>{subject?.outline.modules.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+    <label>Module<select disabled={!subject?.outline.modules.length} value={scope.module??''} onChange={e=>onChange({...scope,module:e.target.value||null,topic:null})}>
+      <option value="">{subject&&!subject.outline.modules.length?'No confirmed modules':requireTopic?'Select a module':'All modules'}</option>{subject?.outline.modules.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
     <label>Topic<select disabled={!module} value={scope.topic??''} onChange={e=>onChange({...scope,topic:e.target.value||null})}>
       <option value="">{requireTopic?'Select a topic':'All topics'}</option>{module?.topics.map(item=><option key={item}>{item}</option>)}</select></label>
-  </div>
+  </div>{subject&&!subject.outline.modules.length&&<p className="notice">Review and confirm the syllabus for {subject.name} in the <a href="#library">Subject Library</a> to choose a module.</p>}</>
 }
 export function defaultScope(subjects:Subject[], selected?:number|null):Scope {
   const subject=subjects.find(item=>item.id===selected)??subjects[0]
