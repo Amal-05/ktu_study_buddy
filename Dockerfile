@@ -22,5 +22,5 @@ COPY sample/ ./sample/
 COPY --from=frontend /build/dist ./frontend/dist
 USER 10001:10001
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=4s --start-period=30s CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).close()"]
+HEALTHCHECK --interval=30s --timeout=4s --start-period=30s CMD ["python", "-c", "import os, urllib.request; port = int(os.getenv('PORT') or os.getenv('BUDDY_PORT', '8000')); urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=3).close()"]
 CMD ["sh", "-c", "umask 077; exec python -m backend.launch"]
