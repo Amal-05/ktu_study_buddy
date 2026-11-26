@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from PIL import Image
 from pydantic import BaseModel, Field
@@ -32,7 +32,11 @@ def source_block(sources):
 
 def sanitize_citations(answer, sources):
     labels = {source["label"] for source in sources}
-    return re.sub(r"\[S\d+\]", lambda match: match[0] if match[0][1:-1] in labels else "", answer)
+    verified = {source.get("url") for source in sources}
+    answer = re.sub(r"\[S\d+\]", lambda match: match[0] if match[0][1:-1] in labels else "", answer)
+    answer = re.sub(r"\[([^\]\n]+)\]\(([^)\s]+)\)", lambda match: match[0] if match[2] in verified else match[1], answer)
+    return re.sub(r"(?<![\w(])https?://[^\s>)\]]+", lambda match:
+                  match[0] if match[0].rstrip(".,;") in verified else "[unverified URL removed]", answer)
 
 
 def mock_answer(sources):
@@ -152,6 +156,17 @@ def command_proposal(text, body):
         "/notes": ("generate_notes", True), "/quiz": ("make_quiz", False),
         "/predictions": ("predictions", False), "/grade": ("grade", True), "/plan": ("plan", True),
     }
+    phrases = (
+        (r"^(?:generate|create|make) (?:me )?(?:study )?notes\b", "/notes"),
+        (r"^(?:generate|create|make) (?:me )?(?:a )?quiz\b", "/quiz"),
+        (r"^(?:show|list|rank) (?:me )?(?:the )?(?:predicted|likely) (?:exam )?questions\b", "/predictions"),
+        (r"^(?:grade|mark) (?:my|this|the) answer\b", "/grade"),
+        (r"^(?:update|replan|build|create) (?:my|the|a) study plan\b", "/plan"),
+    )
+    for pattern, tool in phrases:
+        if match := re.match(pattern, text.strip(), re.I):
+            command, detail = tool, text.strip()[match.end():].lstrip(" :")
+            break
     if command.lower() not in commands:
         return None
     tool, confirm = commands[command.lower()]
@@ -179,7 +194,8 @@ async def chat_stream(key: str, body: ChatInput, db: DB):
         raise HTTPException(422, "Attachment belongs to another conversation")
     images = [item.metadata_json["image"] for item in attachments
               if item.metadata_json.get("image") and not any(page["text"] and not page["review"] for page in item.pages)]
-    sources = query(db, body.text, subject, module, topic, body.attachments)
+    lookup = re.sub(r"^/(?:search|web)\s+", "", body.text, flags=re.I)
+    sources = query(db, lookup, subject, module, topic, body.attachments)
     chat["scope"] = {name: getattr(body, name) for name in ("subject_id", "module", "topic")}
     history = [{"role": item["role"], "content": item["content"]} for item in chat["messages"][-30:]]
     chat["messages"].append({"role": "user", "content": body.text, "input": body.model_dump()})
@@ -202,6 +218,19 @@ async def chat_stream(key: str, body: ChatInput, db: DB):
         try:
             if proposal:
                 answer = "Review the study action below."
+                if proposal["tool"] == "predictions" and subject:
+                    from .exams import predictions
+                    with Session() as reading:
+                        ranked = predictions(reading, require(reading, Subject, subject))
+                    rows = [row for row in ranked["topics"] if not module or row["module"] == module][:6]
+                    answer = ranked["confidence"] + ". Predictions are estimates.\n\n" + "\n".join(
+                        f"- **{row['topic']}** · {row['priority']} · {len(row['evidence'])} matched questions" for row in rows)
+                elif proposal["tool"] == "make_quiz" and subject and module and topic:
+                    from .practice import create_quiz
+                    from .study import StudyInput
+                    with Session() as reading:
+                        quiz = await create_quiz(subject, StudyInput(module=module, topic=topic), reading)
+                    answer = "### Quick quiz\n\n" + "\n".join(f"{i}. {card['front']}" for i, card in enumerate(quiz["cards"], 1))
                 yield sse({"type": "delta", "text": answer})
                 info = {"provider": "Study tools", "proposal": proposal}
             elif body.text.startswith("/search "):
@@ -229,6 +258,8 @@ async def chat_stream(key: str, body: ChatInput, db: DB):
                         continue
                     yield sse(event)
             answer = sanitize_citations(answer, sources)
+            if not MOCK and not proposal and not re.search(r"\[S\d+\]|general model knowledge", answer, re.I):
+                answer += "\n\n*General model knowledge.*"
             reply = {"role": "assistant", "content": answer, "sources": [
                 {k: v for k, v in source.items() if k != "text"} for source in sources], **info}
             with Session() as writing:
@@ -241,6 +272,6 @@ async def chat_stream(key: str, body: ChatInput, db: DB):
                 put(writing, "chat", key, saved)
                 writing.commit()
             yield sse({"type": "done", "message": reply})
-        except (Unavailable, ProviderError) as exc:
-            yield sse({"type": "error", "message": str(exc)})
+        except (Unavailable, ProviderError, HTTPException) as exc:
+            yield sse({"type": "error", "message": exc.detail if isinstance(exc, HTTPException) else str(exc)})
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})

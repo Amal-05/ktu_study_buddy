@@ -3,10 +3,12 @@ import os
 import re
 import zipfile
 from pathlib import Path
+from typing import Literal
 
 import pymupdf
 import pytesseract
 from docx import Document
+from docx.oxml.ns import qn
 from PIL import Image
 from pptx import Presentation
 from pydantic import BaseModel, Field, model_validator
@@ -19,6 +21,7 @@ if os.getenv("TESSERACT_CMD"):
 
 class Part(BaseModel):
     name: str
+    scope: Literal["module", "paper"] = "module"
     offered: int = Field(ge=1, le=20)
     attempt: int = Field(ge=1, le=20)
     marks: int = Field(ge=1, le=100)
@@ -36,6 +39,12 @@ class Pattern(BaseModel):
     ese: int = Field(default=60, ge=1, le=300)
     duration_minutes: int = Field(default=150, ge=1, le=600)
     parts: list[Part] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def unique_parts(self):
+        if len({part.name for part in self.parts}) != len(self.parts):
+            raise ValueError("Exam part names must be unique")
+        return self
 
 
 class Module(BaseModel):
@@ -57,7 +66,10 @@ class Outline(BaseModel):
     def validate_outline(self):
         if len({m.id for m in self.modules}) != len(self.modules):
             raise ValueError("Module IDs must be unique")
-        total = sum(part.attempt * part.marks for part in self.pattern.parts) * len(self.modules)
+        if any(len(set(module.topics)) != len(module.topics) for module in self.modules):
+            raise ValueError("Topics within a module must be unique")
+        total = sum(part.attempt * part.marks * (len(self.modules) if part.scope == "module" else 1)
+                    for part in self.pattern.parts)
         if self.modules and total != self.pattern.ese:
             raise ValueError(f"The question pattern awards {total} marks, but the ESE is {self.pattern.ese}")
         return self
@@ -99,12 +111,16 @@ def extract(name, raw):
             pages = []
             for page in doc:
                 native = page.get_text(sort=True).strip()
-                if len(native) >= 40:
+                page_area = max(1, page.rect.width * page.rect.height)
+                image_cover = max((pymupdf.Rect(image["bbox"]).get_area() / page_area
+                                   for image in page.get_image_info()), default=0)
+                if len(native) >= 40 and not (image_cover > .6 and len(native) < 350):
                     pages.append((native, None))
                 else:
-                    pix = page.get_pixmap(matrix=pymupdf.Matrix(1.6, 1.6), colorspace=pymupdf.csRGB)
+                    scale = min(1.6, (12_000_000 / page_area) ** .5)
+                    pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), colorspace=pymupdf.csRGB)
                     text, confidence = ocr(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
-                    pages.append((text or native, confidence))
+                    pages.append((text if len(text) > len(native) else native, confidence))
     elif suffix == ".docx":
         doc = Document(io.BytesIO(raw))
         pages = [("", None)]
@@ -112,8 +128,20 @@ def extract(name, raw):
         from docx.text.paragraph import Paragraph
         for child in doc.element.body:
             if child.tag.endswith("}p"):
-                p = Paragraph(child, doc)
-                pieces = re.split(r"(\f)", p.text)
+                paragraph = Paragraph(child, doc)
+                pieces = ["\f"] if paragraph.paragraph_format.page_break_before and pages[-1][0].strip() else []
+                contents = []
+                for item in child.iter():
+                    if item.tag == qn("w:t"):
+                        contents.append(item.text or "")
+                    elif item.tag == qn("w:tab"):
+                        contents.append("\t")
+                    elif item.tag == qn("w:lastRenderedPageBreak"):
+                        if not contents or contents[-1] != "\f":
+                            contents.append("\f")
+                    elif item.tag == qn("w:br"):
+                        contents.append("\f" if item.get(qn("w:type")) == "page" else "\n")
+                pieces.extend(re.split(r"(\f)", "".join(contents)))
             elif child.tag.endswith("}tbl"):
                 pieces = ["\n".join(" | ".join(c.text for c in row.cells) for row in Table(child, doc).rows)]
             else:
@@ -197,19 +225,35 @@ def parse_syllabus(pages):
         if match := re.search(expression, evidence, re.I):
             pattern[field] = int(match[1])
     parts = []
+    number_words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+
+    def number(token):
+        return number_words[token.lower()] if token.lower() in number_words else int(token)
+
     for line in result["pattern_evidence"]:
         if match := re.search(r"\bPart\s+([A-Z])\s*[:\-]?\s*(\d+)\s*(?:questions?\s*)?[x×]\s*(\d+)", line, re.I):
             name, count, marks = match.groups()
             previous = next((part for part in pattern["parts"] if part["name"] == name.upper()), None)
-            if re.search(r"\bper module\b", line, re.I):
+            per_module = re.search(r"\b(\d+|one|two|three|four|five)\s+(?:questions?\s+)?per module", line, re.I)
+            scope = "paper" if re.search(r"\b(?:whole paper|across all modules|overall)\b", line, re.I) else "module"
+            if scope == "paper":
+                offered = int(count)
+            elif per_module and not re.search(r"marks?\s+per module", line, re.I):
+                offered = number(per_module[1])
+            elif re.search(r"[x×]\s*\d+\s*(?:marks?\s*)?per module", line, re.I):
                 offered = int(count)
             else:
                 offered = max(1, int(count) // max(1, len(result["modules"])))
-            choice = re.search(r"\b(?:answer|attempt)\s+(\d+|one|two)\b", line, re.I)
-            attempts = {"one": 1, "two": 2}
-            attempt = (attempts.get(choice[1].lower()) or int(choice[1])) if choice else min(offered, previous["attempt"] if previous else offered)
+            choice = re.search(r"\b(?:answer|attempt)\s+(\d+|one|two|three|four|five|all)\b", line, re.I)
+            if choice:
+                attempt = offered if choice[1].lower() == "all" else number(choice[1])
+            elif scope == "paper" or re.search(r"\ball compulsory\b", line, re.I):
+                attempt = offered
+            else:
+                attempt = min(offered, previous["attempt"] if previous else offered)
+            offered = max(offered, attempt)
             subdivisions = re.search(r"\b(\d+)\s+subdivisions?", line, re.I)
-            parts.append({"name": name.upper(), "offered": offered, "attempt": attempt, "marks": int(marks),
+            parts.append({"name": name.upper(), "scope": scope, "offered": offered, "attempt": attempt, "marks": int(marks),
                           "subdivisions": int(subdivisions[1]) if subdivisions else previous["subdivisions"] if previous else 1})
     if parts:
         pattern["parts"] = parts

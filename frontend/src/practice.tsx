@@ -12,7 +12,7 @@ const tabs=[['quiz','Quiz'],['flashcards','Flashcards'],['grade','Grade answer']
 export function Practice(shared:Shared){
   const {scope,setScope,base,valid,params}=useStudy(shared)
   const action=useAction()
-  const [tab,setTab]=useState(shared.proposal?.tool==='grade'?'grade':'quiz')
+  const [tab,setTab]=useState(shared.proposal?.tool==='mock'?'mock':shared.proposal?.tool==='grade'?'grade':'quiz')
   const [quiz,setQuiz]=useState<Card[]>([])
   const [cards,setCards]=useState<Card[]>([])
   const [shown,setShown]=useState<string[]>([])

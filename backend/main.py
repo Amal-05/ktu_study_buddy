@@ -4,16 +4,19 @@ from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import PurePath
 from typing import Annotated, Literal
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session as Database
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .db import ROOT, Provider, Subject, Upload, migrate, session
+from .db import DATA, ROOT, Chunk, Provider, Subject, Upload, migrate, session
 from .documents import MAX_BYTES, Outline, default_pattern, extract, parse_syllabus
 from .providers import DEFAULT_LIMITS, ENDPOINTS, MOCK, ProviderError, cipher, endpoint, models, public
 
@@ -33,7 +36,15 @@ async def lifespan(app):
 
 
 app = FastAPI(title="KTU Study Buddy", lifespan=lifespan)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
 DB = Annotated[Database, Depends(session)]
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request, exc):
+    # Validation failures for provider forms must not echo submitted credentials.
+    return JSONResponse({"detail": [{"loc": item["loc"], "msg": item["msg"], "type": item["type"]}
+                                    for item in exc.errors()]}, status_code=422)
 
 
 @app.middleware("http")
@@ -103,9 +114,11 @@ def update_outline(subject_id: int, body: Outline, db: DB):
 
 
 def upload_data(upload, pages=False):
+    metadata = {key: value for key, value in upload.metadata_json.items() if key not in {"image", "original", "chat"}}
+    metadata["downloadable"] = bool(upload.metadata_json.get("original"))
     return {"id": upload.id, "subject_id": upload.subject_id, "name": upload.name, "tag": upload.tag,
             "pages": upload.pages if pages else [{key: val for key, val in page.items() if key != "text"} for page in upload.pages],
-            "metadata": upload.metadata_json}
+            "metadata": metadata}
 
 
 @app.get("/api/subjects/{subject_id}/uploads")
@@ -132,16 +145,54 @@ async def read_upload(file):
 async def add_upload(subject_id: int, db: DB, file: Annotated[UploadFile, File()],
                      tag: Annotated[Literal["syllabus", "notes", "pyq", "textbook", "other"], Form()]):
     subject = require(db, Subject, subject_id)
-    name, _, pages = await read_upload(file)
-    row = Upload(subject_id=subject_id, name=name, tag=tag, pages=pages, metadata_json={})
+    name, raw, pages = await read_upload(file)
+    original = DATA / f"{uuid4().hex}.upload"
+    metadata = {"original": original.name}
+    row = Upload(subject_id=subject_id, name=name, tag=tag, pages=pages, metadata_json=metadata)
     if tag == "syllabus":
-        row.metadata_json = {"preview": parse_syllabus(pages)}
-    db.add(row)
-    db.flush()
-    from .retrieval import index_upload
-    index_upload(db, row, subject)
-    db.commit()
+        row.metadata_json = {**metadata, "preview": parse_syllabus(pages)}
+    original.write_bytes(raw)
+    try:
+        db.add(row)
+        db.flush()
+        from .retrieval import index_upload
+        await run_in_threadpool(index_upload, db, row, subject)
+        db.commit()
+    except BaseException:
+        original.unlink(missing_ok=True)
+        raise
     return upload_data(row, pages=True)
+
+
+@app.get("/api/uploads/{upload_id}/download")
+def download_upload(upload_id: int, db: DB):
+    document = require(db, Upload, upload_id)
+    original = document.metadata_json.get("original")
+    if not original or not (DATA / original).is_file():
+        raise HTTPException(404, "The original file is unavailable")
+    return FileResponse(DATA / original, filename=document.name, media_type="application/octet-stream")
+
+
+class PageReview(BaseModel):
+    text: str = Field(max_length=100000)
+
+
+@app.put("/api/uploads/{upload_id}/pages/{page_number}")
+def review_page(upload_id: int, page_number: int, body: PageReview, db: DB):
+    from .retrieval import index_upload
+
+    document = require(db, Upload, upload_id)
+    if not any(page["number"] == page_number for page in document.pages):
+        raise HTTPException(404, "Page does not exist")
+    replacement = {"number": page_number, "text": body.text.strip(), "ocr_confidence": None, "review": False}
+    document.pages = [replacement if page["number"] == page_number else page for page in document.pages]
+    if document.tag == "syllabus":
+        document.metadata_json = {**document.metadata_json, "preview": parse_syllabus(document.pages)}
+    db.execute(delete(Chunk).where(Chunk.upload_id == upload_id, Chunk.page == page_number))
+    subject = db.get(Subject, document.subject_id) if document.subject_id else None
+    index_upload(db, document, subject, pages=[replacement])
+    db.commit()
+    return upload_data(document, pages=True)
 
 
 class ProviderInput(BaseModel):
@@ -162,6 +213,12 @@ class ProviderInput(BaseModel):
             raise ValueError("Context and output limits must be integers")
         if not 1024 <= merged["context"] <= 2_000_000 or not 16 <= merged["max_output"] < merged["context"] - 512:
             raise ValueError("Set positive output and context limits with room for the prompt")
+        for key in ("requests_per_minute", "tokens_per_minute"):
+            if type(merged[key]) is not int or not 0 <= merged[key] <= 20_000_000:
+                raise ValueError("Per-minute limits must be nonnegative integers")
+        for key in ("vision", "structured", "long_context"):
+            if type(merged[key]) is not bool:
+                raise ValueError("Provider capabilities must be boolean")
         return merged
 
 

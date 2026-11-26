@@ -24,7 +24,7 @@ export function Dashboard({planner,revision,subjects,add,demo,choose,go,proposal
     <ErrorBox text={action.error}/>
     {!planner&&<>
       <section className="welcome">
-        <div><div className="welcome-badge"><Sparkles size={15}/> YOUR STUDY WORKSPACE</div>
+        <div>
         <h2>{subjects.length?'Make progress today':'Ready to start studying?'}</h2>
         <p>{subjects.length?'Review your coverage, revisit a weak topic, or work through today’s plan.':'Add a subject and upload its syllabus to organize your materials, generate notes, and start practicing.'}</p>
         <div className="actions"><button className="btn hero-primary" onClick={subjects.length?()=>go('planner'):add}>{subjects.length?'Open study planner':'Add your first subject'}</button>{!subjects.length&&<button className="btn hero-secondary" onClick={demo}><BookOpen size={16}/>Load sample subject</button>}</div></div>

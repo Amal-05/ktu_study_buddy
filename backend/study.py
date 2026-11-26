@@ -10,14 +10,13 @@ from uuid import uuid4
 import pymupdf
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
-from sqlalchemy import select
+from pydantic import BaseModel, Field, field_validator
 
 from sample.reference import TOPICS
 
-from .chat import SYSTEM, Scope, sanitize_citations, scope_values, source_block
+from .chat import SYSTEM, sanitize_citations, source_block
 from .core import get, put, records
-from .db import Record, Session, Subject
+from .db import Session, Subject
 from .main import DB, require
 from .providers import MOCK, ProviderError, Unavailable, router
 from .research import search
@@ -40,6 +39,13 @@ class NoteEdit(StudyInput):
 
 class NoteBody(BaseModel):
     sections: dict[str, str]
+
+    @field_validator("sections")
+    @classmethod
+    def complete_sections(cls, value):
+        if any(not value.get(heading, "").strip() for heading in SECTIONS):
+            raise ValueError("Include text for every requested section")
+        return value
 
 
 class LessonBody(BaseModel):
@@ -91,7 +97,8 @@ def note_fixture(subject, topic, sources):
         return {"sections": {section: (f"[{valid['label']}] {valid['text'][:500]}" if valid and section == "Definition" else
                                        "Mock mode has no authored content for this topic." + label) for section in SECTIONS}}
     definition, example, question, answers, detail = demo
-    origin = "\n\n*Bundled demo explanation.*" + label
+    reference = next((source for source in sources if source["name"] == "sample-reference.txt"), None)
+    origin = f"\n\n[{reference['label']}] *Bundled demo explanation.*" if reference else "\n\n*Bundled demo explanation.*" + label
     values = [definition, f"Think about this example: {example}", detail, example,
               "```mermaid\nflowchart LR\n  A[Read the input] --> B[Apply the rule] --> C[Check the result]\n```",
               "See the cost or condition in the detailed explanation.",
@@ -213,6 +220,12 @@ def job_status(key: str, db: DB):
     if result is None:
         raise HTTPException(404, "Job does not exist")
     return result
+
+
+@api.get("/subjects/{subject_id}/notes/jobs")
+def latest_note_job(subject_id: int, db: DB):
+    require(db, Subject, subject_id)
+    return next((job for _, job in records(db, "job") if job["subject_id"] == subject_id), None)
 
 
 @api.post("/jobs/{key}/retry")

@@ -1,7 +1,5 @@
-import json
 import math
 import time
-from collections import defaultdict
 from datetime import date, timedelta
 from uuid import uuid4
 
@@ -271,8 +269,9 @@ def dashboard_subject(db, subject, day):
 
 
 @api.get("/dashboard")
-def dashboard(db: DB, day: date = date.today()):
+def dashboard(db: DB, day: date | None = None):
     from sqlalchemy import select
+    day = day or date.today()
     subjects = [dashboard_subject(db, subject, day) for subject in db.scalars(select(Subject).order_by(Subject.exam_date))]
     plan = get(db, "plan", day.isoformat(), {"tasks": [], "hours": 2})
     prior = [item for key, item in records(db, "plan") if key < day.isoformat()]

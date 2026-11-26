@@ -72,7 +72,7 @@ function App(){
         {page==='notes'&&<Notes {...shared} refresh={refresh}/>}
         {page==='teacher'&&<Teacher {...shared} chat={openChat}/>}
         {page==='chat'&&<Chat subjects={subjects} initial={scope} perform={perform}/>}
-        {page==='exams'&&<Exams {...shared} practice={()=>go('practice')}/>}
+        {page==='exams'&&<Exams {...shared} practice={id=>{setSelected(id);setScope(undefined);setProposal({tool:'mock',requires_confirmation:false,subject_id:id,module:null,topic:null,argument:''});go('practice')}}/>}
         {page==='practice'&&<Practice {...shared}/>}
         {page==='settings'&&<ProviderSettings status={status}/>}
       </main>

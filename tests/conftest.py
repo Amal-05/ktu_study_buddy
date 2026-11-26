@@ -15,5 +15,11 @@ def client():
     from fastapi.testclient import TestClient
     from backend.server import app
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         yield client
+
+
+def pytest_sessionfinish(session, exitstatus):
+    from backend.db import engine
+    engine.dispose()
+    TEST_DATA.cleanup()

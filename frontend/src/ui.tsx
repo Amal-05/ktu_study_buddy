@@ -52,6 +52,7 @@ export function Markdown({value,sources=[]}:{value:string,sources?:Source[]}) {
   const content=value.replace(/\[(S\d+)\](?!\()/g,(match,id)=>byLabel.has(id)?match+'('+encodeURI(byLabel.get(id)!.url)+')':match)
   return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm,remarkMath]} rehypePlugins={[rehypeKatex]}
     components={{a:({href,children})=><a href={href} target="_blank" rel="noreferrer">{children}</a>,
+      img:({alt})=><span>{alt??'Image'}</span>,
       pre:({children})=><div className="code-block">{children}</div>,
       code:({className,children})=>className==='language-mermaid'?<Diagram code={String(children)}/>:<code className={className}>{children}</code>}}>{content}</ReactMarkdown></div>
 }

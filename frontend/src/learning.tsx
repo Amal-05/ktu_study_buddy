@@ -26,6 +26,12 @@ export function Notes(shared:Shared&{refresh:()=>Promise<void>}){
   async function load(){if(valid){const value=await api<Note>(base+'/notes?'+params);setNote(value);setVersion(value.active??'')}}
   useEffect(()=>{setNote(undefined);setEdit(undefined);setVersion('');void action.run(load)},[base,params])
   useEffect(()=>{
+    let active=true
+    setJob(undefined)
+    if(base)void api<Job|null>(base+'/notes/jobs').then(value=>{if(active&&value)setJob(value)}).catch(error=>{if(active)action.setError(String(error))})
+    return()=>{active=false}
+  },[base])
+  useEffect(()=>{
     if(!job||!['queued','running','waiting'].includes(job.state))return
     let active=true
     let timer:number

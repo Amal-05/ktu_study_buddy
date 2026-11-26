@@ -1,6 +1,9 @@
 import json
 import time
+from io import BytesIO
 from types import SimpleNamespace
+
+from docx import Document
 
 from backend.chat import sanitize_citations
 from backend.db import ROOT
@@ -11,6 +14,17 @@ from backend.exams import backtest, extract_questions, generate_paper, score_top
 def sample_outline():
     path = ROOT / "sample" / "sample-syllabus.md"
     return Outline.model_validate(parse_syllabus(extract(path.name, path.read_bytes()))).model_dump()
+
+
+def test_word_explicit_page_break_keeps_document_page_labels():
+    document = Document()
+    document.add_paragraph("The first page")
+    document.add_page_break()
+    document.add_paragraph("The second page")
+    file = BytesIO()
+    document.save(file)
+    pages = extract("notes.docx", file.getvalue())
+    assert [(page["number"], page["text"]) for page in pages] == [(1, "The first page"), (2, "The second page")]
 
 
 def test_sample_syllabus_and_default_paper():
@@ -39,6 +53,30 @@ def test_pattern_consumes_subject_configuration():
     assert paper["total"] == 40
     assert paper["sections"][0]["max_subdivisions"] == 2
     assert all(len(group["questions"]) == 3 for group in paper["sections"][0]["groups"])
+
+
+def test_whole_paper_choice_uses_single_group():
+    outline = sample_outline()
+    outline["pattern"]["ese"] = 20
+    outline["pattern"]["parts"] = [{"name": "X", "scope": "paper", "offered": 6, "attempt": 4, "marks": 5}]
+    checked = Outline.model_validate(outline).model_dump()
+    paper = generate_paper(checked, score_topics(checked, []))
+    group, = paper["sections"][0]["groups"]
+    assert paper["total"] == 20
+    assert len(group["questions"]) == 6 and group["attempt"] == 4
+    assert all(q["module"] != "all" for q in group["questions"])
+
+
+def test_upload_preserves_original_and_updates_reviewed_page(client):
+    subject = client.post("/api/subjects", json={"code": "OCRTEST", "name": "Upload test", "semester": 2,
+                                                "branch": "Computer Science", "exam_date": "2029-01-01"}).json()
+    upload = client.post(f"/api/subjects/{subject['id']}/uploads", data={"tag": "notes"},
+                         files={"file": ("notes.txt", b"Original page contents")}).json()
+    page = f"/api/uploads/{upload['id']}/pages/1"
+    assert client.get(page).text == "Original page contents"
+    assert client.put(page, json={"text": "Corrected page contents"}).is_success
+    assert client.get(page).text == "Corrected page contents"
+    assert client.get(f"/api/uploads/{upload['id']}/download").content == b"Original page contents"
 
 
 def make_paper(identifier, year, scheme, topic):
@@ -94,7 +132,8 @@ def test_sample_end_to_end(client):
     result = client.post("/api/mock/" + attempt["id"] + "/submit", json={"answers": {
         q["id"]: "A stack removes the newest item first (LIFO). A queue removes the oldest item first (FIFO)."}}).json()
     assert result["possible"] == 60 and result["awarded"] > 0
-    assert client.get("/api/dashboard").json()["subjects"][0]["mastery"] > 0
+    summary = client.get("/api/dashboard").json()["subjects"]
+    assert next(row for row in summary if row["id"] == sample["id"])["mastery"] > 0
     chat = client.post("/api/chats", json={"subject_id": sample["id"], **scope}).json()
     reply = client.post(f"/api/chats/{chat['id']}/stream", json={"text": "How do stacks and queues work?",
                                                                "subject_id": sample["id"], **scope})

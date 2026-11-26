@@ -36,7 +36,12 @@ export function Library({subjects,selected,select,refresh,create,setCreate,demo}
         {action.busy&&<Busy label="Reading library or extracting pages…"/>}
         <div className="subject-list">{files.map(item=><div className="subject-row" key={item.id}><button className="subject-link" onClick={()=>void action.run(async()=>setShown(await api<Upload>('/uploads/'+item.id)))}><FileText size={19}/><span><strong>{item.name}</strong><small>{item.tag} · {item.pages.length} pages{item.pages.some(page=>page.review)?' · OCR review needed':''}</small></span></button>
           {item.metadata.preview&&<button className="btn secondary" onClick={()=>setPreview(item.metadata.preview)}>Review syllabus</button>}</div>)}</div>
-        {shown&&<details open className="document-preview"><summary>{shown.name} · page review</summary>{shown.pages.map(page=><details key={page.number}><summary>Page {page.number}{page.review?' · Review OCR ('+page.ocr_confidence+'%)':''}</summary><pre>{page.text||'No extracted text on this page.'}</pre></details>)}</details>}
+        {shown&&<DocumentReview key={shown.id} document={shown} busy={action.busy} save={(page,text)=>void action.run(async()=>{
+          const revised=await api<Upload>('/uploads/'+shown.id+'/pages/'+page,{text},'PUT')
+          setShown(revised)
+          if(revised.metadata.preview)setPreview(revised.metadata.preview)
+          await load(id!)
+        })}/>}
       </section>
       {preview&&<OutlineEditor key={JSON.stringify(preview)} source={preview} cancel={()=>setPreview(undefined)} save={outline=>void action.run(async()=>{await api('/subjects/'+id+'/outline',outline,'PUT');setPreview(undefined);await refresh();await load(id!)})} busy={action.busy}/>}
       <section className="card panel"><div className="section-head"><h2>Coverage map</h2><button className="btn secondary" onClick={()=>setPreview(subject.outline)}>Edit outline</button></div>
@@ -44,6 +49,22 @@ export function Library({subjects,selected,select,refresh,create,setCreate,demo}
       </section></>}
   </>
 }
+function DocumentReview({document,busy,save}:{document:Upload,busy:boolean,save:(page:number,text:string)=>void}){
+  const [drafts,setDrafts]=useState<Record<number,string>>({})
+  return <details open className="document-preview">
+    <summary>{document.name} · page review</summary>
+    {document.metadata.downloadable&&<a className="btn secondary" href={'/api/uploads/'+document.id+'/download'}>Download original</a>}
+    {document.pages.map(page=><details key={page.number}>
+      <summary>Page {page.number}{page.review?' · Review OCR ('+page.ocr_confidence+'%)':''}</summary>
+      {drafts[page.number]===undefined?<><pre>{page.text||'No extracted text on this page.'}</pre><button className="btn secondary" onClick={()=>setDrafts({...drafts,[page.number]:page.text??''})}>Correct page text</button></>:
+      <form onSubmit={e=>{e.preventDefault();save(page.number,drafts[page.number])}}>
+        <label>Page transcription<textarea rows={6} value={drafts[page.number]} onChange={e=>setDrafts({...drafts,[page.number]:e.target.value})}/></label>
+        <div className="actions"><button className="btn primary" disabled={busy}>Save transcription</button><button className="btn plain" type="button" onClick={()=>setDrafts(Object.fromEntries(Object.entries(drafts).filter(([key])=>Number(key)!==page.number)))}>View saved text</button></div>
+      </form>}
+    </details>)}
+  </details>
+}
+
 function OutlineEditor({source,save,cancel,busy}:{source:Outline,save:(value:Outline)=>void,cancel:()=>void,busy:boolean}){
   const [outline,setOutline]=useState<Outline>(()=>structuredClone(source))
   function change(fn:(draft:Outline)=>void){const draft=structuredClone(outline);fn(draft);setOutline(draft)}
@@ -54,7 +75,8 @@ function OutlineEditor({source,save,cancel,busy}:{source:Outline,save:(value:Out
     <div className="field-grid">{(['cie','ese','duration_minutes'] as const).map((key,index)=><label key={key}>{['CIE marks','ESE marks','Duration in minutes'][index]}<input type="number" min={key==='cie'?0:1} value={outline.pattern[key]} onChange={e=>change(draft=>{draft.pattern[key]=Number(e.target.value)})}/></label>)}</div>
     {outline.pattern.parts.map((part,index)=><div className="part-editor" key={index}>
       <label>Part<input required value={part.name} onChange={e=>change(draft=>{draft.pattern.parts[index].name=e.target.value})}/></label>
-      {(['offered','attempt','marks','subdivisions'] as const).map((key,i)=><label key={key}>{['Offered / module','Attempt / module','Marks / question','Max subdivisions'][i]}<input type="number" min="1" value={part[key]} onChange={e=>change(draft=>{draft.pattern.parts[index][key]=Number(e.target.value)})}/></label>)}
+      <label>Applies to<select value={part.scope??'module'} onChange={e=>change(draft=>{draft.pattern.parts[index].scope=e.target.value as 'module'|'paper'})}><option value="module">Each module</option><option value="paper">Whole paper</option></select></label>
+      {(['offered','attempt','marks','subdivisions'] as const).map((key,i)=><label key={key}>{['Questions offered','Questions to attempt','Marks / question','Max subdivisions'][i]}<input type="number" min="1" value={part[key]} onChange={e=>change(draft=>{draft.pattern.parts[index][key]=Number(e.target.value)})}/></label>)}
       <button type="button" className="btn secondary" disabled={outline.pattern.parts.length===1} onClick={()=>change(draft=>{draft.pattern.parts.splice(index,1)})}>Remove</button>
     </div>)}
     <button type="button" className="btn secondary" onClick={()=>change(draft=>{draft.pattern.parts.push({name:'C',offered:1,attempt:1,marks:1,subdivisions:1})})}>Add exam part</button>
@@ -69,7 +91,7 @@ function OutlineEditor({source,save,cancel,busy}:{source:Outline,save:(value:Out
     <div className="actions"><button className="btn primary" disabled={busy}>Confirm syllabus</button><button type="button" className="btn plain" onClick={cancel}>Cancel</button></div>
   </form>
 }
-type Limits={context:number,max_output:number,vision:boolean,structured:boolean,long_context:boolean}
+type Limits={context:number,max_output:number,vision:boolean,structured:boolean,long_context:boolean,requests_per_minute?:number,tokens_per_minute?:number}
 type Provider={id:number,kind:string,name:string,model:string,base_url:string,last_four:string,position:number,enabled:boolean,status:string,cooldown:number,calls:number,tokens:number,limits:Limits}
 type ProviderForm=Pick<Provider,'kind'|'name'|'model'|'base_url'|'position'|'enabled'|'limits'>&{key:string}
 const providerInitial=():ProviderForm=>({kind:'Gemini',name:'',model:'',base_url:'',key:'',position:0,enabled:true,limits:{context:16000,max_output:2200,vision:false,structured:false,long_context:false}})
@@ -108,6 +130,7 @@ export function ProviderSettings({status}:{status:{mock:boolean,search_mock:bool
         {form.kind==='Custom'&&<label>Base URL<input required value={form.base_url} onChange={e=>setForm({...form,base_url:e.target.value})}/></label>}
         <label>Priority (lower first)<input type="number" min="0" max="200" value={form.position} onChange={e=>setForm({...form,position:Number(e.target.value)})}/></label>
         {(['context','max_output'] as const).map((key,i)=><label key={key}>{i?'Maximum output tokens':'Context tokens'}<input type="number" required value={form.limits[key]} onChange={e=>setForm({...form,limits:{...form.limits,[key]:Number(e.target.value)}})}/></label>)}
+        {(['requests_per_minute','tokens_per_minute'] as const).map((key,i)=><label key={key}>{i?'Tokens per minute (0 = unset)':'Requests per minute (0 = unset)'}<input type="number" min="0" value={form.limits[key]??0} onChange={e=>setForm({...form,limits:{...form.limits,[key]:Number(e.target.value)}})}/></label>)}
       </div>
       <div className="actions checks"><label><input type="checkbox" checked={form.enabled} onChange={e=>setForm({...form,enabled:e.target.checked})}/>Enabled</label>{(['vision','structured','long_context'] as const).map((key,i)=><label key={key}><input type="checkbox" checked={form.limits[key]} onChange={e=>setForm({...form,limits:{...form.limits,[key]:e.target.checked}})}/>{['Vision','Structured outputs','Long context'][i]}</label>)}</div>
       <button className="btn primary" disabled={action.busy}>Save provider</button>

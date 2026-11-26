@@ -10,7 +10,7 @@ type Data={confidence:string,matched_questions:number,scheme_papers:number,topic
 type Answer={text:string,sources:Source[],provider:string}
 type Candidate={url:string,name:string,text:string}
 
-export function Exams(shared:Shared&{practice:()=>void}){
+export function Exams(shared:Shared&{practice:(id:number)=>void}){
   const [id,setId]=useState(shared.selected??shared.subjects[0]?.id??0)
   const [data,setData]=useState<Data>()
   const [paper,setPaper]=useState<Paper>()
@@ -29,7 +29,7 @@ export function Exams(shared:Shared&{practice:()=>void}){
   useEffect(()=>{setData(undefined);setPaper(undefined);setCandidates(null);setAnswer(undefined);setShowPaper(false);if(id)void action.run(load)},[id])
   function model(q:Question){void action.run(async()=>setAnswer({id:q.id,value:await api(base+'/model-answer',{module:q.module,topic:q.topic,question:q.text,marks:q.marks})}))}
   return <>
-    <Heading title="Exam prep" action={<button className="btn primary" disabled={!paper} onClick={shared.practice}><Target size={17}/>Timed practice</button>}>Rank likely topics, inspect evidence, and build a paper from your confirmed pattern.</Heading>
+    <Heading title="Exam prep" action={<button className="btn primary" disabled={!paper} onClick={()=>shared.practice(id)}><Target size={17}/>Timed practice</button>}>Rank likely topics, inspect evidence, and build a paper from your confirmed pattern.</Heading>
     <ErrorBox text={action.error}/>
     <section className="card panel">
       <div className="inline-form"><label>Subject<select value={id} onChange={e=>setId(Number(e.target.value))}><option value={0}>Select subject</option>{shared.subjects.map(row=><option key={row.id} value={row.id}>{row.code} · {row.name}</option>)}</select></label>
@@ -51,7 +51,7 @@ export function Exams(shared:Shared&{practice:()=>void}){
           {topic.evidence.length?<ul>{topic.evidence.map((ev,i)=><li key={i}><a href={ev.url} target="_blank" rel="noreferrer">{ev.name} · p. {ev.page}</a> · {ev.year??'Year unknown'} {ev.session} · {ev.scheme===2024?'2024 scheme':ev.scheme?'Older scheme '+ev.scheme:'Scheme unknown'}{ev.marks?' · '+ev.marks+' marks':''}<p>{ev.text}</p></li>)}</ul>:<p className="muted">Syllabus factors only. No matched past-paper evidence.</p>}
           {topic.clusters.some(group=>group.length>1)&&<p>{topic.clusters.filter(group=>group.length>1).length} repeated-question clusters</p>}
         </details>)}
-        {paper?.sections.map(section=><div className="prediction-questions" key={section.name}><h4>Part {section.name} · {section.marks} marks</h4>{section.groups.find(group=>group.module===module.id)?.questions.map(q=><div className="question-row" key={q.id}><span><span className="chip">Generated</span> {q.text}</span><button className="btn secondary" disabled={action.busy} onClick={()=>model(q)}>Model answer</button>
+        {paper?.sections.map(section=><div className="prediction-questions" key={section.name}><h4>Part {section.name} · {section.marks} marks</h4>{section.groups.flatMap(group=>group.questions).filter(q=>q.module===module.id).map(q=><div className="question-row" key={q.id}><span><span className="chip">Generated</span> {q.text}</span><button className="btn secondary" disabled={action.busy} onClick={()=>model(q)}>Model answer</button>
           {answer?.id===q.id&&<div className="wide"><Markdown value={answer.value.text} sources={answer.value.sources}/><Sources sources={answer.value.sources}/><small>{answer.value.provider}</small></div>}</div>)}</div>)}
       </div>)}
     </section>}

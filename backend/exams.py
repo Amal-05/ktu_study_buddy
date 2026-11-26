@@ -124,7 +124,9 @@ def score_topics(outline, questions, year=None):
             factors = {
                 "frequency": sum(weight for weight, _ in support.values()) / paper_count,
                 "recency": sum(recency for _, recency in support.values()) / paper_count,
-                "module_weight": sum(part["attempt"] * part["marks"] for part in pattern["parts"]) / pattern["ese"],
+                "module_weight": sum(part["attempt"] * part["marks"] /
+                                     (max(1, len(outline["modules"])) if part.get("scope") == "paper" else 1)
+                                     for part in pattern["parts"]) / pattern["ese"],
                 "hours": module["hours"] / max_hours,
                 "outcomes": len(module["outcomes"]) / max_outcomes,
             }
@@ -151,11 +153,13 @@ def backtest(outline, questions):
     ranking = score_topics(outline, training, year)
     for module in outline["modules"]:
         ranked = [row for row in ranking if row["module"] == module["id"]]
-        slots = sum(part["offered"] for part in outline["pattern"]["parts"])
+        slots = sum(part["offered"] for part in outline["pattern"]["parts"] if part.get("scope") != "paper")
         top.update((row["module"], row["topic"]) for row in ranked[:slots])
+    overall_slots = sum(part["offered"] for part in outline["pattern"]["parts"] if part.get("scope") == "paper")
+    top.update((row["module"], row["topic"]) for row in ranking[:overall_slots])
     hits = len(hidden & top)
     return {"year": year, "session": session, "paper": latest, "hits": hits, "total": len(hidden),
-            "rate": round(hits / len(hidden), 3) if hidden else 0, "method": "Topic recall in the offered-question slots per module"}
+            "rate": round(hits / len(hidden), 3) if hidden else 0, "method": "Topic recall in the offered-question slots"}
 
 
 def predictions(db, subject):
@@ -182,15 +186,22 @@ def generate_paper(subject, ranked):
     number = 0
     for part in pattern["parts"]:
         groups = []
-        for module in outline["modules"]:
-            candidates = [row["topic"] for row in ranked if row["module"] == module["id"]] or module["topics"] or [module["name"]]
+        in_paper = part.get("scope") == "paper"
+        modules = [{"id": "all", "name": "All modules"}] if in_paper else outline["modules"]
+        for module in modules:
+            candidates = [(row["module"], row["topic"]) for row in ranked if in_paper or row["module"] == module["id"]]
+            if not candidates:
+                candidates = [(item["id"], topic) for item in (outline["modules"] if in_paper else [module])
+                              for topic in item["topics"] or [item["name"]]]
+            if not candidates:
+                continue
             questions = []
             for index in range(part["offered"]):
-                topic = candidates[index % len(candidates)]
+                chosen_module, topic = candidates[index % len(candidates)]
                 variant = index + len(sections)
                 number += 1
                 questions.append({"id": str(number), "text": variants[variant % len(variants)].format(topic=topic),
-                                  "marks": part["marks"], "topic": topic, "module": module["id"], "generated": True})
+                                  "marks": part["marks"], "topic": topic, "module": chosen_module, "generated": True})
             groups.append({"module": module["id"], "name": module["name"], "attempt": part["attempt"], "questions": questions})
         sections.append({"name": part["name"], "marks": part["marks"], "max_subdivisions": part["subdivisions"], "groups": groups})
     return {"sections": sections, "total": sum(group["attempt"] * section["marks"] for section in sections for group in section["groups"]),
@@ -288,12 +299,27 @@ class ModelAnswer(BaseModel):
 @api.post("/subjects/{subject_id}/model-answer")
 async def answer_model(subject_id: int, body: ModelAnswer, db: DB):
     from .chat import SYSTEM, mock_answer, sanitize_citations
-    require(db, Subject, subject_id)
+    from .study import demo_content, study_scope
+    subject = require(db, Subject, subject_id)
+    study_scope(subject, body.module, body.topic)
     sources = query(db, body.topic, subject_id, body.module, body.topic)
-    user = f"Write a {body.marks}-mark model answer to: {body.question}\n{source_block(sources)}"
+    user = f"Write a {body.marks}-mark model answer to: {body.question}\nUntrusted sources:\n{source_block(sources)}"
+    demo = demo_content(subject, body.topic)
+
+    def fixture():
+        if not demo:
+            return mock_answer(sources)
+        reference = next((item for item in sources if item["name"] == "sample-reference.txt"), None)
+        label = f" [{reference['label']}]" if reference else ""
+        paragraphs = [f"**Definition.** {demo[0]}{label}"]
+        if body.marks > 3:
+            paragraphs.append(f"**Worked example.** {demo[1]}{label}")
+        paragraphs.append(f"**Cost or limitation.** {demo[4]}{label}")
+        return "\n\n".join(paragraphs) + "\n\n*Bundled demo answer.*"
+
     try:
         text, info = await router.complete([{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
-                                           fixture=lambda: mock_answer(sources))
+                                           fixture=fixture)
     except (Unavailable, ProviderError) as exc:
         raise HTTPException(503, str(exc)) from exc
     return {"text": sanitize_citations(text, sources), "sources": sources, **info}

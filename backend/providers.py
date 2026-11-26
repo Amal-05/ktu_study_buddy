@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from collections import defaultdict, deque
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
@@ -21,7 +22,8 @@ ENDPOINTS = {
     "OpenRouter": "https://openrouter.ai/api/v1",
     "Mistral": "https://api.mistral.ai/v1",
 }
-DEFAULT_LIMITS = {"context": 16000, "max_output": 2200, "vision": False, "structured": False, "long_context": False}
+DEFAULT_LIMITS = {"context": 16000, "max_output": 2200, "vision": False, "structured": False, "long_context": False,
+                  "requests_per_minute": 0, "tokens_per_minute": 0}
 MOCK = os.getenv("BUDDY_MOCK", "1") == "1"
 
 
@@ -173,6 +175,12 @@ def trim(messages, maximum):
         room = max(256, (maximum - estimate(system)) * 4 - 100)
         if isinstance(recent[-1]["content"], str):
             recent[-1]["content"] = recent[-1]["content"][:room]
+        else:
+            parts = recent[-1]["content"]
+            image_cost = sum(1000 for item in parts if item["type"] == "image_url")
+            budget = max(64, room - image_cost * 4)
+            recent[-1]["content"] = [{**part, "text": part["text"][:budget]} if part["type"] == "text" else part
+                                      for part in parts]
     return system + recent
 
 
@@ -180,6 +188,23 @@ class Router:
     def __init__(self, adapter=compatible_stream, mock=MOCK):
         self.adapter = adapter
         self.mock = mock
+        self.recent = defaultdict(deque)
+
+    def reserve(self, provider, messages):
+        limits = DEFAULT_LIMITS | provider.limits
+        rpm, tpm = limits["requests_per_minute"], limits["tokens_per_minute"]
+        if not (rpm or tpm):
+            return
+        now = time.time()
+        entries = self.recent[(provider.id, provider.last_four)]
+        while entries and entries[0][0] <= now - 60:
+            entries.popleft()
+        tokens = estimate(trim(messages, limits["context"] - limits["max_output"])) + limits["max_output"]
+        if tpm and tokens > tpm:
+            raise ProviderError("Estimated request exceeds the configured token limit", "skip")
+        if entries and ((rpm and len(entries) >= rpm) or (tpm and sum(item[1] for item in entries) + tokens > tpm)):
+            raise ProviderError("Configured per-minute limit reached", "cooldown", entries[0][0] + 60)
+        entries.append((now, tokens))
 
     async def stream(self, messages, *, capability=None, schema=None, fixture=None):
         if self.mock:
@@ -214,6 +239,7 @@ class Router:
                 for attempt in range(2 if schema else 1):
                     answer = ""
                     prompt = messages if attempt == 0 else messages + [{"role": "user", "content": "Return only valid JSON matching the requested schema."}]
+                    self.reserve(provider, prompt)
                     async for chunk in self.adapter(provider, prompt, bool(schema)):
                         answer += chunk
                         if not schema:
@@ -232,6 +258,9 @@ class Router:
             except ProviderError as exc:
                 if exc.action == "stop":
                     raise
+                if exc.action == "skip":
+                    yield {"type": "status", "message": f"{provider.name}: {exc}"}
+                    continue
                 with Session() as db:
                     row = db.get(Provider, provider.id)
                     if row:

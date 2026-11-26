@@ -4,12 +4,10 @@ import re
 import textwrap
 import threading
 from collections import Counter
-from pathlib import Path
-
 import sqlite_vec
-from sqlalchemy import select, func
+from sqlalchemy import bindparam, select, text
 
-from .db import DATA, Chunk, Subject, Upload
+from .db import DATA, Chunk, Upload
 
 logger = logging.getLogger(__name__)
 _model = None
@@ -57,18 +55,23 @@ def map_topic(text, outline):
     return None, None
 
 
-def index_upload(db, upload, subject=None):
+def index_upload(db, upload, subject=None, *, pages=None):
     snippets = []
-    for page in upload.pages:
-        snippets.extend((page["number"], text) for text in textwrap.wrap(
-            page["text"], width=1050, replace_whitespace=False, break_long_words=False
-        ) if text.strip())
+    for page in upload.pages if pages is None else pages:
+        if upload.tag == "syllabus":
+            blocks = page["text"].splitlines()
+        else:
+            blocks = re.split(r"\n\s*\n", page["text"])
+        for block in blocks:
+            snippets.extend((page["number"], excerpt) for excerpt in textwrap.wrap(
+                block, width=1050, replace_whitespace=False, break_long_words=False
+            ) if excerpt.strip())
     if not snippets:
         return
-    vectors = embedding([text for _, text in snippets])
-    for (page, text), vector in zip(snippets, vectors):
-        module, topic = map_topic(text, subject.outline) if subject else (None, None)
-        db.add(Chunk(upload_id=upload.id, page=page, text=text, module=module, topic=topic, vector=vector))
+    vectors = embedding([excerpt for _, excerpt in snippets])
+    for (page, excerpt), vector in zip(snippets, vectors):
+        module, topic = map_topic(excerpt, subject.outline) if subject else (None, None)
+        db.add(Chunk(upload_id=upload.id, page=page, text=excerpt, module=module, topic=topic, vector=vector))
 
 
 def remap(db, subject):
@@ -89,16 +92,23 @@ def query(db, question, subject=None, module=None, topic=None, attachments=(), t
         scope = and_(scope, Upload.tag.in_(tags))
     statement = statement.where(or_(scope, Upload.id.in_(attachments)))
     terms = words(question)
-    has_vectors = db.scalar(select(Chunk.id).where(Chunk.vector.is_not(None)).limit(1))
-    vector = embedding([question])[0] if has_vectors else None
-    distance = func.vec_distance_cosine(Chunk.vector, vector) if vector else None
+    candidates = db.execute(statement).all()
+    vector_ids = [chunk.id for chunk, _ in candidates if chunk.vector is not None]
+    vector = embedding([question])[0] if vector_ids else None
+    similarities = {}
     if vector:
-        statement = statement.add_columns(distance)
+        # Keep each scoped batch below SQLite's parameter and vec0 neighbor limits.
+        knn = text("SELECT rowid, distance FROM chunk_vectors "
+                   "WHERE embedding MATCH :embedding AND k = :neighbors AND rowid IN :ids").bindparams(
+                       bindparam("ids", expanding=True))
+        for start in range(0, len(vector_ids), 500):
+            batch = vector_ids[start:start + 500]
+            neighbors = db.execute(knn, {"embedding": vector, "neighbors": min(len(batch), limit * 5), "ids": batch})
+            similarities.update((row_id, max(0, 1 - distance)) for row_id, distance in neighbors)
     ranked = []
-    for row in db.execute(statement):
-        chunk, upload = row[:2]
+    for chunk, upload in candidates:
         overlap = len(terms & words(chunk.text)) / max(1, len(terms))
-        similarity = max(0, 1 - row[2]) if vector and row[2] is not None else 0
+        similarity = similarities.get(chunk.id, 0)
         attached = upload.id in attachments
         if not (overlap > 0 or similarity > .55 or attached or topic):
             continue
