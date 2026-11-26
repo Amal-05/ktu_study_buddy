@@ -1,14 +1,25 @@
 # KTU Study Buddy
 
-A single-user study workspace for KTU B.Tech courses under the 2024 scheme. It runs on your computer and stores your library, notes, conversations, and progress in SQLite.
+KTU Study Buddy is a study workspace for KTU B.Tech students following the 2024 scheme. Organize your subjects, ask questions, revise from your materials, and practise for exams.
+
+**[Open the live app](https://ktu-study-buddy.onrender.com/)**
+
+Create an account with a username and password or continue with GitHub. Each account has a private workspace. Start with the sample Algorithms subject or add your own.
+
+## What you can do
+
+- Ask open-ended questions in **Study Chat** without uploading anything. Add an AI provider key in **Settings** for live explanations and follow-up questions.
+- Upload syllabi, notes, textbooks, and past papers. Generate revision notes with references to uploaded pages and export them as Markdown or PDF.
+- Work through short lessons in **Teacher Mode**. Practise with quizzes, flashcards, and timed mock exams, or submit written answers for feedback.
+- Set exam dates, plan study sessions, and use available past-paper evidence to help prioritize revision.
 
 ## Host for multiple students
 
-The hosted edition adds public signup, private workspaces, recovery codes, HTTPS, and persistent storage. It runs the same study tools and lets each student bring their own AI key. See the [hosting guide](deploy/README.md) for deployment and backups.
+The live app runs on Render with persistent PostgreSQL storage on Neon. The local edition stores your library, notes, conversations, and progress in SQLite. See the [hosting guide](deploy/README.md) for deployment and backups.
 
 For free managed hosting, use the [Render and Neon deployment guide](deploy/RENDER.md).
 
-## Start the app
+## Run locally
 
 Install Python 3.12 or 3.13 and Node.js 22 with npm. From the project folder, run:
 
